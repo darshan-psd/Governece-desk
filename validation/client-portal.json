@@ -1,0 +1,15 @@
+{
+  "checks": 121,
+  "passed": [
+    "Client-created company and scoped profile access",
+    "Profile formats, shareholding and capital validation",
+    "Sequential evidence-backed onboarding and registration gate",
+    "Idempotent annual checklist, reviewed dates and calendar alerts/export",
+    "Published document ZIP, private/cross-company download denial",
+    "Thread messaging, read receipts, safe attachments and concurrency",
+    "Draft invoice isolation, unique issue number and integer INR totals",
+    "Pending proof does not mark paid; client cannot verify payments",
+    "Overpayment and duplicate reference rejection, partial payments and receipts",
+    "Evidence changes reopen verified milestones"
+  ]
+}

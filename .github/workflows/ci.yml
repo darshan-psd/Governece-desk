@@ -1,0 +1,72 @@
+# Governance Desk CI: every check that guards the existing behaviour, from a clean checkout.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck, build, backend tests, compatibility checks, browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # No GOVERNANCE_* variables here: every suite starts its own servers with the "test" profile
+    # and temporary data directories (see backend/tests/conftest.py and scripts/run-compat-tests.mjs).
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js (version from .nvmrc)
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable pnpm (version from package.json "packageManager")
+        run: corepack enable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install backend dependencies
+        # backend/.venv is the interpreter used by `pnpm test:compat` and documented for local use.
+        run: |
+          python -m venv backend/.venv
+          backend/.venv/bin/pip install --upgrade pip
+          backend/.venv/bin/pip install -r backend/requirements-dev.txt
+
+      - name: Frontend typecheck
+        run: pnpm typecheck
+
+      - name: Frontend build
+        run: pnpm frontend:build
+
+      - name: Migrations apply to a fresh database
+        working-directory: backend
+        run: .venv/bin/alembic -x db="$RUNNER_TEMP/ci-migration.sqlite" upgrade head && .venv/bin/alembic -x db="$RUNNER_TEMP/ci-migration.sqlite" current
+
+      - name: Backend tests (pytest)
+        working-directory: backend
+        run: .venv/bin/python -m pytest
+
+      - name: Compatibility checks (original 325 API checks against FastAPI)
+        run: pnpm test:compat
+
+      - name: Browser tests (React app against FastAPI, system Chrome)
+        working-directory: backend
+        env:
+          GOVERNANCE_E2E: "1"
+        run: .venv/bin/python -m pytest tests/e2e

@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import {dateValid,nextDate,reviewProblems,validateRecord,csvCell,canAccess} from '../lib/workflow-rules.ts';
+assert.equal(dateValid('2026-02-29'),false);
+assert.equal(dateValid('2028-02-29'),true);
+assert.equal(nextDate('2026-01-31','Monthly'), '2026-02-28');
+assert.equal(nextDate('2026-01-31','Monthly',2), '2026-03-31');
+assert.equal(nextDate('2028-02-29','Annual'), '2029-02-28');
+assert.equal(nextDate('2026-11-30','Quarterly'), '2027-02-28');
+assert.throws(()=>validateRecord('rule',{title:'Rule',company:'c',due:'2026-10-01',frequency:'Monthly',source:'Policy',offset:-1}));
+assert.equal(canAccess({role:'Client',companies:['a']},{kind:'company',id:'b'}),false);
+assert.ok(csvCell('=SUM(A1)').startsWith('"\''));
+const docs=[{id:'d',kind:'document',company:'a'}];
+assert.ok(reviewProblems({company:'a',evidence:['d','unknown'],preparer:'one'},docs,{id:'two'}).includes('All evidence must belong to this company.'));
+console.log('10 workflow rule checks passed (dates, recurrence, source validation, access and evidence).');

@@ -1,0 +1,1 @@
+{"extends":"./tsconfig.json","compilerOptions":{"incremental":false,"plugins":[]},"include":["frontend/**/*.ts","frontend/**/*.tsx"],"exclude":["node_modules",".sites-runtime",".next",".wrangler","build","dist",".vinext","legacy","backend"]}

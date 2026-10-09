@@ -1,0 +1,14 @@
+{
+  "checks": 204,
+  "passed": [
+    "Preparation checklist, invalid dates, current-company evidence, stale-write conflict, independent approval and approved-record lock",
+    "Submission authorisation, portal reference and current acknowledgement document required before filing completion",
+    "Immutable document versions, superseded evidence rejected and dependent approval invalidation",
+    "Dependencies, quorum excluding conflicts and duplicate attendees, meeting actions, immutable escaped evidence packs",
+    "Corporate-event task generation, sequencing and completion gate",
+    "Scoped client requests, response correction and closure, role enforcement, header spoofing blocked, audit and document isolation",
+    "Balanced decimal CSV validation, duplicate imports, separate import review, financial-close evidence and version invalidation",
+    "Independent rule publication, 90-day schedule, idempotent generation and retained rule snapshots",
+    "Idempotent reminders, source-linked local briefings, unconfigured providers blocked, CSV formula escaping and old-route/foreign-origin rejection"
+  ]
+}

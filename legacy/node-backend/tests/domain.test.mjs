@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import {transitionError,validate} from '../lib/domain.ts';
+import {parseTrialBalance} from '../lib/accounting.ts';
+const item={id:'x',kind:'task',revision:1,updated:'',status:'Under review'};
+assert.match(transitionError(item,'Approved',false),/Attach/);
+assert.equal(transitionError(item,'Approved',true),null);
+assert.match(transitionError({...item,status:'Not started'},'Completed',true),/not allowed/);
+assert.match(transitionError({...item,status:'Approved',filing:true},'Completed',true),/acknowledgement/);
+assert.equal(transitionError({...item,status:'Approved',filing:true,acknowledgement:'Receipt 1'},'Completed',true),null);
+assert.throws(()=>validate('task',{title:'Test',company:'c',due:'2026-02-30'}));
+assert.throws(()=>validate('company',{name:' '}));
+assert.equal(parseTrialBalance('account,debit,credit\nCash,100.10,0\nCapital,0,100.10').balanced,true);
+assert.equal(parseTrialBalance('account,debit,credit\n"Cash, bank",100,0').difference,10000);
+assert.throws(()=>parseTrialBalance('account,debit,credit\nCash,-2,0'));
+assert.throws(()=>parseTrialBalance('account,debit,credit\nCash,1.001,0'));
+assert.throws(()=>parseTrialBalance('name,amount\nCash,3'));
+console.log('12 workflow, evidence, date and accounting assertions passed.');

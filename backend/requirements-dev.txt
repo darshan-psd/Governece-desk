@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==9.1.1
+# Browser test of the React app (tests/e2e). Uses the installed Google Chrome; no browser download needed.
+playwright==1.63.0
