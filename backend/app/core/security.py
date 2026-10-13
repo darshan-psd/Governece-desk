@@ -3,8 +3,12 @@
 * Host header must be ``127.0.0.1:<port>`` (DNS-rebinding protection) or an explicitly allowed host.
 * A cross-site ``Origin`` header is rejected.
 * Request bodies are limited to 12 MB.
+* NUL characters (``%00``) are removed from the query string, so no query parameter can carry one
+  into a database query (PostgreSQL rejects NUL in text; see ``app.core.jsvalues.without_nul``).
 """
 from __future__ import annotations
+
+import re
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -14,6 +18,7 @@ from app.core.errors import PayloadTooLarge
 HEALTH_PATHS = ("/health", "/ready")
 
 MAX_BODY_BYTES = 12 * 1024 * 1024
+_ENCODED_NUL = re.compile(rb"%00|\x00")
 
 
 async def _plain(send: Send, status: int, body: str) -> None:
@@ -30,6 +35,9 @@ class LocalSecurityMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        query = scope.get("query_string", b"")
+        if b"%00" in query or b"\x00" in query:
+            scope = {**scope, "query_string": _ENCODED_NUL.sub(b"", query)}
         if scope["path"] in HEALTH_PATHS and scope["method"] in ("GET", "HEAD"):
             # Probes come from load balancers with their own Host header; they expose nothing.
             await self.app(scope, receive, send)

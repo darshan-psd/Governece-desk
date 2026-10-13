@@ -14,7 +14,9 @@ from app.domain.portal_domain import ACT_SOURCE, ANNUAL_ITEMS, DOCUMENT_CATEGORI
 from app.domain.workflow_rules import require_date
 from app.permissions import Context
 from app.repositories.records import AuditRepository, RecordRepository
+from app.repositories.identity import IdentityRepository
 from app.services.context import audit_label
+from app.services.identity_service import add_member, apply_new_credentials, prepare_new_credentials
 from app.services.portal.common import evidence, onboarding, portal_save, record, writer
 
 STAGE_STATUSES = ("Not started", "In progress", "Waiting for client", "Verified")
@@ -24,6 +26,18 @@ OBLIGATION_STATUSES = ("Not started", "In progress", "Waiting for client", "Comp
 # Company profile -------------------------------------------------------------------------
 
 def company_create(services: Services, ctx: Context, body: dict) -> dict:
+    """Staff may optionally onboard the client's sign-in in the same step: a name alone creates a
+    credential-less profile (invite it later from Team & Access); a name with an email and
+    password creates and credentials it immediately — the client can sign in right away with no
+    forced change. Either way this is one database transaction with the company itself, so a
+    rejected password or a taken email leaves nothing behind — not a company with half-created
+    client access.
+    """
+    client_name = text(body.get("clientName"))
+    client_email = client_password = None
+    if ctx.role != "Client" and client_name and truthy(body.get("clientEmail")):
+        client_email, client_password = prepare_new_credentials(
+            services, body.get("clientEmail"), body.get("clientPassword"), body.get("clientConfirmPassword"), client_name)
     profile = company_profile(body.get("data"))
     company_id = str(uuid.uuid4())
     company = {**profile, "profileStatus": "Draft", "portalCreatedBy": ctx.actor["id"], "created": now_iso()}
@@ -39,9 +53,15 @@ def company_create(services: Services, ctx: Context, body: dict) -> dict:
                 raise Conflict("Your profile changed. Retry company creation.")
         repo.insert(company_id, "company", company)
         repo.insert(f"onboard-{company_id}", "onboarding", onboarding(company_id))
-        if ctx.role != "Client" and text(body.get("clientName")):
-            repo.insert(str(uuid.uuid4()), "member", {"name": text(body["clientName"]), "role": "Client", "companies": [company_id], "active": True, "preview": True})
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Started client onboarding"), company["name"])
+        if ctx.role == "Client":
+            IdentityRepository(session).grant_company(ctx.owner, ctx.membership_id, company_id)
+        if ctx.role != "Client" and client_name:
+            client_id = str(uuid.uuid4())
+            repo.insert(client_id, "member", {"name": client_name, "role": "Client", "companies": [company_id], "active": True, "preview": services.settings.local_preview})
+            membership = add_member(session, ctx.owner, client_id, client_name, "Client", [company_id])
+            if client_email:
+                apply_new_credentials(session, services, ctx, membership, client_email, client_password)
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Started client onboarding"), company["name"])
     return {"ok": True, "id": company_id}
 
 
@@ -75,7 +95,7 @@ def start_onboarding(services: Services, ctx: Context, body: dict, c: dict) -> d
         raise BadRequest("Onboarding already exists.")
     with services.db.write() as session:
         RecordRepository(session, ctx.owner).insert(f"onboard-{c['id']}", "onboarding", onboarding(c["id"]))
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Started onboarding"), c.get("name"))
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Started onboarding"), c.get("name"))
     return {"ok": True}
 
 
@@ -136,7 +156,7 @@ def annual_plan(services: Services, ctx: Context, body: dict, c: dict) -> dict:
                 "status": "Needs scheduling", "source": ACT_SOURCE, "note": "Applicability and due date require secretary review.",
                 "evidence": [], "filing": i < 2,
             })
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Created annual compliance checklist"), f"{c.get('name')} {period}")
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Created annual compliance checklist"), f"{c.get('name')} {period}")
     return {"ok": True}
 
 
@@ -168,7 +188,7 @@ def obligation_upsert(services: Services, ctx: Context, body: dict, c: dict, exi
     obligation_id = str(uuid.uuid4())
     with services.db.write() as session:
         RecordRepository(session, ctx.owner).insert(obligation_id, "portalobligation", value)
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Scheduled client compliance"), title)
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Scheduled client compliance"), title)
     return {"ok": True, "id": obligation_id}
 
 
@@ -185,7 +205,7 @@ def publish_task(services: Services, ctx: Context, body: dict, c: dict) -> dict:
             "company": c["id"], "title": task.get("title"), "sourceTask": task["id"], "due": task.get("due"), "status": task.get("status"),
             "source": task.get("source") or "Company secretary work register", "note": text(body.get("note")), "evidence": [],
         })
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Published work to client calendar"), task.get("title"))
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Published work to client calendar"), task.get("title"))
     return {"ok": True}
 
 
@@ -207,7 +227,7 @@ def thread_create(services: Services, ctx: Context, body: dict, c: dict) -> dict
             "company": c["id"], "title": subject, "status": "Open", "messages": [_message(ctx, content, ids)],
             "readBy": {ctx.actor["id"]: now_iso()},
         })
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Started portal conversation"), subject)
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Started portal conversation"), subject)
     return {"ok": True, "id": thread_id}
 
 

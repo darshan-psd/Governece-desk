@@ -24,15 +24,15 @@ REAL_DB = DEFAULT_DATA_DIR / "preview.sqlite"
 
 
 def deployed(tmp_path: Path, env: str = "production", **overrides) -> Settings:
-    values = dict(governance_environment=env, governance_auth_mode="disabled", governance_data_dir=tmp_path / "data",
-                  governance_allowed_hosts="testserver", governance_reminders_enabled=False, _env_file=None)
+    values = dict(governance_environment=env, governance_auth_mode="password", governance_data_dir=tmp_path / "data",
+                  governance_allowed_hosts="testserver", governance_public_url="https://testserver", governance_mail_provider="disabled", governance_reminders_enabled=False, _env_file=None)
     values.update(overrides)
     return Settings(**values)
 
 
 def migrated(settings: Settings) -> Settings:
     settings.governance_data_dir.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(f"sqlite:///{settings.database_path}")
+    engine = create_engine(settings.database_url)
     upgrade_to_head(engine)
     engine.dispose()
     settings.files_dir.mkdir(parents=True, exist_ok=True)
@@ -82,8 +82,30 @@ def test_secrets_never_appear_in_reprs_or_errors(tmp_path):
     assert settings.openai_api_key.get_secret_value() == secret
 
 
-def test_production_app_starts_safely(tmp_path):
-    with TestClient(create_app(migrated(deployed(tmp_path))), base_url="http://testserver") as client:
+def test_database_password_is_never_exposed(tmp_path):
+    from app.database import Database
+
+    secret = "pw-" + uuid.uuid4().hex
+    url = f"postgresql://governance:{secret}@127.0.0.1:1/governance"  # nothing listens on port 1
+    settings = Settings(governance_environment="production", governance_database_url=url, _env_file=None)
+    assert settings.uses_postgres and settings.database_url.startswith("postgresql+psycopg://")
+    assert secret not in repr(settings) and secret not in str(settings.model_dump()) and secret not in " ".join(settings.problems())
+    db = Database(settings.database_url, settings)
+    assert secret not in repr(db.engine) and secret not in repr(db.url)
+    with pytest.raises(Exception) as error:
+        db.ping()
+    assert secret not in str(error.value) and secret not in repr(error.value)
+    db.dispose()
+
+
+def test_production_requires_postgresql(tmp_path):
+    problems = " ".join(deployed(tmp_path).problems())
+    assert "GOVERNANCE_DATABASE_URL must point to PostgreSQL in production" in problems
+
+
+@pytest.mark.postgres
+def test_production_app_starts_safely(tmp_path, postgres_url):
+    with TestClient(create_app(migrated(deployed(tmp_path, governance_database_url=postgres_url))), base_url="http://testserver") as client:
         page = client.get("/")
         assert COOKIE not in page.cookies  # no local-preview sign-in
         assert client.get("/api/v2").status_code == 401
@@ -92,15 +114,17 @@ def test_production_app_starts_safely(tmp_path):
             assert client.get(path).status_code == 404, path
 
 
-def test_deployed_profile_refuses_an_unmigrated_database(tmp_path):
+@pytest.mark.postgres
+def test_deployed_profile_refuses_an_unmigrated_database(tmp_path, postgres_url):
     with pytest.raises(ConfigurationError, match="alembic upgrade head"):
-        with TestClient(create_app(deployed(tmp_path, env="staging"))):
+        with TestClient(create_app(deployed(tmp_path, env="staging", governance_database_url=postgres_url))):
             pass
 
 
-def test_api_docs_can_be_enabled_explicitly(tmp_path, client):
+@pytest.mark.postgres
+def test_api_docs_can_be_enabled_explicitly(tmp_path, client, postgres_url):
     assert client.get("/api/docs").status_code == 200 and client.get("/api/openapi.json").status_code == 200
-    settings = migrated(deployed(tmp_path, governance_api_docs=True))
+    settings = migrated(deployed(tmp_path, governance_api_docs=True, governance_database_url=postgres_url))
     with TestClient(create_app(settings), base_url="http://testserver") as prod:
         assert prod.get("/api/openapi.json").status_code == 200
 
@@ -187,6 +211,7 @@ def test_security_headers_on_every_response(api, path):
 
 # Data directory -----------------------------------------------------------------------------------
 
+@pytest.mark.sqlite_only
 def test_external_data_directory_is_used(tmp_path, settings):
     outside = tmp_path / "governance-data"
     settings = settings.model_copy(update={"governance_data_dir": outside})
@@ -199,28 +224,44 @@ def test_external_data_directory_is_used(tmp_path, settings):
 
 # Alembic --------------------------------------------------------------------------------------
 
+# The columns that existed before any migration (later revisions only add nullable columns).
+ORIGINAL_COLUMNS = {
+    "records": "owner, id, kind, data, revision, updated, rowid",
+    "audit": "id, owner, action, subject, at, rowid",
+    "sessions": "token_hash, workspace, actor, created, expires",
+}
+
+
 def fingerprint(path: Path) -> dict:
     conn = sqlite3.connect(path)
     out = {}
-    for table in ("records", "audit", "sessions"):
-        rows = conn.execute(f"SELECT * FROM {table} ORDER BY 1, 2").fetchall()
+    for table, columns in ORIGINAL_COLUMNS.items():
+        rows = conn.execute(f"SELECT {columns} FROM {table} ORDER BY 1, 2").fetchall()
         out[table] = hashlib.sha256(json.dumps(rows).encode()).hexdigest()
     out["indexes"] = sorted(r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"))
     conn.close()
     return out
 
 
-EXPECTED_INDEXES = ["audit_owner_at", "ix_records_owner_company_kind", "ix_records_owner_kind_updated", "records_owner_kind"]
+EXPECTED_INDEXES = sorted([
+    "audit_owner_at", "ix_records_owner_company_kind", "ix_records_owner_kind_updated", "records_owner_kind",  # 0001
+    "ix_company_access_company", "ix_memberships_user", "ux_users_email",  # 0002
+    "ux_sessions_public_id", "ix_sessions_user", "ix_sessions_membership", "ix_auth_tokens_user",  # 0003
+    "ix_login_attempts_key", "ix_security_events_org_at", "ix_security_events_at",
+    "ux_records_invoice_number", "ux_records_payment_reference", "ux_records_trialbalance_file",  # 0004
+])
 
 
+@pytest.mark.sqlite_only
 def test_fresh_database_is_created_by_migrations(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'fresh.sqlite'}")
     upgrade_to_head(engine)
-    assert current_revision(engine) == head_revision() == "0001_baseline"
+    assert current_revision(engine) == head_revision() == "0005_forced_password_change"
     engine.dispose()
     assert fingerprint(tmp_path / "fresh.sqlite")["indexes"] == EXPECTED_INDEXES
 
 
+@pytest.mark.sqlite_only
 def test_node_era_database_is_adopted_without_touching_rows(tmp_path):
     path = tmp_path / "node.sqlite"
     conn = sqlite3.connect(path)
@@ -241,11 +282,12 @@ def test_node_era_database_is_adopted_without_touching_rows(tmp_path):
 
 def fingerprint_rows(path: Path) -> dict:
     conn = sqlite3.connect(path)
-    out = {t: conn.execute(f"SELECT * FROM {t} ORDER BY 1, 2").fetchall() for t in ("records", "audit")}
+    out = {t: conn.execute(f"SELECT {ORIGINAL_COLUMNS[t]} FROM {t} ORDER BY 1, 2").fetchall() for t in ("records", "audit")}
     conn.close()
     return out
 
 
+@pytest.mark.sqlite_only
 @pytest.mark.skipif(not REAL_DB.is_file(), reason="no local workspace database")
 def test_a_copy_of_the_real_workspace_database_migrates_with_identical_data(tmp_path):
     """Read-only on the real file: it is copied with SQLite's backup API, then the copy is migrated."""
@@ -265,6 +307,7 @@ def test_a_copy_of_the_real_workspace_database_migrates_with_identical_data(tmp_
     assert after["indexes"] == EXPECTED_INDEXES
 
 
+@pytest.mark.sqlite_only
 def test_incompatible_existing_table_is_refused(tmp_path):
     path = tmp_path / "odd.sqlite"
     conn = sqlite3.connect(path)
@@ -278,17 +321,25 @@ def test_incompatible_existing_table_is_refused(tmp_path):
     engine.dispose()
 
 
+@pytest.mark.sqlite_only
 def test_baseline_cannot_be_downgraded(tmp_path):
     from alembic import command
 
     from app.database.migrations import alembic_config
 
+    from app.database.sqlite import transactional_engine
+
     engine = create_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
     upgrade_to_head(engine)
     config = alembic_config()
-    with engine.begin() as connection:
-        config.attributes["connection"] = connection
-        with pytest.raises(RuntimeError, match="cannot be downgraded"):
+    # Same transactional connection the application and the alembic CLI use: the refused step
+    # rolls back every step before it too.
+    migration_engine = transactional_engine(engine.url)
+    with pytest.raises(RuntimeError, match="cannot be downgraded"):
+        with migration_engine.begin() as connection:
+            config.attributes["connection"] = connection
             command.downgrade(config, "base")
+    migration_engine.dispose()
     assert current_revision(engine) == head_revision()
     engine.dispose()
+    assert fingerprint(tmp_path / "db.sqlite")["indexes"] == EXPECTED_INDEXES

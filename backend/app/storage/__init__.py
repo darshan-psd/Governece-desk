@@ -10,6 +10,17 @@ from pathlib import Path
 from urllib.parse import quote
 
 
+def tenant_key(organization_id: str, key) -> str | None:
+    """``key`` if it belongs to the organization's prefix (``<organization>/<id>``), else None.
+
+    Records point to files by key; this check means even a tampered or mis-copied record can
+    never serve another organization's file.
+    """
+    if isinstance(key, str) and key.startswith(f"{organization_id}/") and "/" not in key[len(organization_id) + 1:]:
+        return key
+    return None
+
+
 class LocalFileStorage:
     def __init__(self, root: Path):
         self.root = root

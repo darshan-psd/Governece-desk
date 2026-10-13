@@ -43,6 +43,19 @@ class Settings(BaseSettings):
     # Storage. The development default keeps using the existing local-preview data. Staging and
     # production must point this at a directory outside the source tree.
     governance_data_dir: Path = Field(default=DEFAULT_DATA_DIR)
+    # Database. Empty = the SQLite file <data dir>/preview.sqlite (development and tests).
+    # PostgreSQL (required in staging/production): postgresql+psycopg://user:password@host:5432/db
+    # The URL is a secret (it usually contains the password): masked in reprs and never logged.
+    governance_database_url: SecretStr = SecretStr("")
+    # PostgreSQL connection pool per application process (workers × (size + overflow) must stay
+    # below the server's max_connections), and per-statement limits.
+    governance_db_pool_size: int = Field(5, ge=1, le=100)
+    governance_db_max_overflow: int = Field(5, ge=0, le=100)
+    governance_db_pool_timeout: int = Field(10, ge=1, le=300)
+    governance_db_pool_recycle: int = Field(1800, ge=60)
+    governance_db_statement_timeout_ms: int = Field(30000, ge=0)
+    governance_db_lock_timeout_ms: int = Field(10000, ge=0)
+
     # Built React assets (index.html, app.js, style.css) produced by `pnpm frontend:build`.
     governance_frontend_dir: Path = Field(default=PROJECT_DIR / ".sites-runtime" / "frontend")
 
@@ -52,12 +65,25 @@ class Settings(BaseSettings):
     # staging/production: the public host name(s), e.g. "desk.example.com".
     governance_allowed_hosts: str = ""
 
-    # Authentication. Only "local-preview" exists in this phase (development and test only):
-    # opening the app issues an owner session cookie and "Preview as" switches profile. Any other
-    # value disables the local login, so every API request returns 401.
-    governance_auth_mode: str = "local-preview"
+    # Authentication:
+    # * "local-preview" (development/test only): opening the app issues an Owner session and
+    #   "Preview as" switches profile. Refused in staging/production.
+    # * "password": built-in email + password sign-in (argon2id), invitations, password reset.
+    governance_auth_mode: Literal["local-preview", "password"] = "local-preview"
     governance_workspace_id: str = "local-preview"
-    governance_session_hours: int = 12
+    governance_session_hours: int = Field(12, ge=1, le=24 * 30)          # absolute lifetime
+    governance_session_idle_minutes: int = Field(30, ge=5, le=24 * 60)   # password sessions only
+    # Sign-in throttling: failures allowed per account / per client address within the window.
+    governance_login_max_failures: int = Field(5, ge=1)
+    governance_login_max_failures_per_client: int = Field(30, ge=1)
+    governance_login_window_minutes: int = Field(15, ge=1)
+    governance_activation_hours: int = Field(72, ge=1)
+    governance_reset_minutes: int = Field(30, ge=5)
+    # Number of reverse proxies in front of the app that append to X-Forwarded-For. 0 = use the
+    # socket address (local). Only trust what your own proxies set.
+    governance_forwarded_hops: int = Field(0, ge=0, le=5)
+    # Public base URL used in emailed links (activation, password reset), e.g. https://desk.example.com
+    governance_public_url: str = ""
 
     governance_reminders_enabled: bool = True
     governance_reminder_interval_seconds: int = 60
@@ -77,6 +103,14 @@ class Settings(BaseSettings):
     openai_model: str = ""
     resend_api_key: SecretStr = SecretStr("")
     mail_from: str = ""
+    # Email delivery: "outbox" writes messages to <data dir>/mail-outbox (development sink, nothing
+    # leaves the machine), "resend" or "smtp" send for real, "disabled" drops them (logged).
+    governance_mail_provider: Literal["outbox", "resend", "smtp", "disabled"] = "outbox"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: SecretStr = SecretStr("")
+    smtp_starttls: bool = True
 
     # Derived settings -------------------------------------------------------------------------
     @property
@@ -90,7 +124,22 @@ class Settings(BaseSettings):
 
     @property
     def database_path(self) -> Path:
+        """The SQLite database file (used when no GOVERNANCE_DATABASE_URL is set)."""
         return self.governance_data_dir / "preview.sqlite"
+
+    @property
+    def database_url(self) -> str:
+        url = self.governance_database_url.get_secret_value().strip()
+        if not url:
+            return f"sqlite:///{self.database_path}"
+        for prefix in ("postgres://", "postgresql://"):
+            if url.startswith(prefix):
+                return "postgresql+psycopg://" + url[len(prefix):]
+        return url
+
+    @property
+    def uses_postgres(self) -> bool:
+        return self.database_url.startswith("postgresql+")
 
     @property
     def files_dir(self) -> Path:
@@ -103,6 +152,14 @@ class Settings(BaseSettings):
     @property
     def local_preview(self) -> bool:
         return self.governance_auth_mode == "local-preview"
+
+    @property
+    def password_auth(self) -> bool:
+        return self.governance_auth_mode == "password"
+
+    @property
+    def outbox_dir(self) -> Path:
+        return self.governance_data_dir / "mail-outbox"
 
     @property
     def api_docs_enabled(self) -> bool:
@@ -127,6 +184,8 @@ class Settings(BaseSettings):
         data_dir_set = "governance_data_dir" in self.model_fields_set
         if self.governance_environment == "test" and not data_dir_set:
             issues.append("GOVERNANCE_DATA_DIR must be set explicitly in the test environment.")
+        if not (self.database_url.startswith("sqlite:///") or self.uses_postgres):
+            issues.append("GOVERNANCE_DATABASE_URL must be a postgresql+psycopg:// URL (or empty for the local SQLite file).")
         if self.is_deployed:
             env = self.governance_environment
             if self.local_preview:
@@ -139,6 +198,16 @@ class Settings(BaseSettings):
                 issues.append(f"GOVERNANCE_ALLOWED_HOSTS must list the public host name(s) in {env}.")
             if self.governance_auto_migrate:
                 issues.append(f"GOVERNANCE_AUTO_MIGRATE cannot be enabled in {env}; run `alembic upgrade head` as a deployment step.")
+            if not self.uses_postgres:
+                issues.append(f"GOVERNANCE_DATABASE_URL must point to PostgreSQL in {env}; SQLite is for development and tests.")
+            if not self.governance_public_url.startswith("https://"):
+                issues.append(f"GOVERNANCE_PUBLIC_URL must be the https:// address of the site in {env} (used in emailed links).")
+            if self.governance_mail_provider == "outbox":
+                issues.append(f"GOVERNANCE_MAIL_PROVIDER=outbox is a development sink; choose resend, smtp or disabled in {env}.")
+        if self.governance_mail_provider == "resend" and not (self.resend_api_key.get_secret_value() and self.mail_from):
+            issues.append("GOVERNANCE_MAIL_PROVIDER=resend requires RESEND_API_KEY and MAIL_FROM.")
+        if self.governance_mail_provider == "smtp" and not (self.smtp_host and self.mail_from):
+            issues.append("GOVERNANCE_MAIL_PROVIDER=smtp requires SMTP_HOST and MAIL_FROM.")
         return issues
 
     def validate_runtime(self) -> None:

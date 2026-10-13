@@ -140,3 +140,19 @@ def date_valid(value: Any) -> bool:
         return date.fromisoformat(value).isoformat() == value
     except ValueError:
         return False
+
+
+def without_nul(value: Any) -> Any:
+    """``value`` with NUL characters removed from every string (keys included).
+
+    No business field can legitimately contain NUL, and PostgreSQL cannot store it in text or
+    JSONB, so request input is cleaned once at the boundary and both databases store the same text.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {without_nul(k): without_nul(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [without_nul(v) for v in value]
+    return value
+

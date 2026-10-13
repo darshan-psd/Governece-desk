@@ -6,7 +6,7 @@ from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import services_of
-from app.auth import ensure_local_session
+from app.auth import ensure_csrf_cookie, ensure_local_session
 
 router = APIRouter()
 
@@ -24,8 +24,11 @@ def _asset(request: Request, path: str) -> Response:
 @router.get("/")
 async def index(request: Request):
     response = _asset(request, "/")
+    services = services_of(request)
     # Local-preview sign-in: opening the app page creates an owner session if none exists.
-    await run_in_threadpool(ensure_local_session, services_of(request), request, response)
+    issued = await run_in_threadpool(ensure_local_session, services, request, response)
+    if not issued:
+        await run_in_threadpool(ensure_csrf_cookie, services, request, response)
     return response
 
 

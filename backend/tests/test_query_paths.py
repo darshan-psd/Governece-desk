@@ -1,11 +1,12 @@
 """The optimised query paths must return exactly what the original whole-workspace logic returned."""
 import json
-import sqlite3
 from datetime import date
 
 import pytest
+from sqlalchemy import text
 
 from app.auth import Principal
+from app.repositories.identity import IdentityRepository
 from app.permissions import accessible, client_safe
 from app.repositories.records import RecordRepository
 from app.services.context import load_context
@@ -13,6 +14,12 @@ from app.services.portal.state import portal_state
 from app.services.records_service import read_state, read_state_json
 
 WS = "local-preview"
+
+
+def principal(services, member_id: str) -> Principal:
+    """The session principal of a workspace profile (resolved through its membership)."""
+    with services.db.read() as session:
+        return Principal(IdentityRepository(session).membership_by_member(WS, member_id).id)
 
 
 @pytest.fixture
@@ -41,14 +48,16 @@ def busy(api, client):
     services = client.app.state.services
     # Edge cases the original code tolerated: non-object JSON data, a briefing with a missing source,
     # unicode text and escaped characters.
-    db = sqlite3.connect(services.db.path)
-    db.execute("INSERT INTO records VALUES (?,?,?,?,1,?)", (WS, "odd", "task", "[1,2]", "2026-01-01T00:00:00.000Z"))
-    db.execute("INSERT INTO records VALUES (?,?,?,?,1,?)", (WS, "orphan-briefing", "briefing",
-               json.dumps({"title": "Orphan", "company": c1, "sources": [{"id": "gone"}]}), "2026-01-01T00:00:00.000Z"))
-    db.execute("INSERT INTO records VALUES (?,?,?,?,1,?)", (WS, "uni", "task",
-               json.dumps({"title": "Résumé — \"quoted\" \\ back", "company": c1, "key": "secret/path"}, ensure_ascii=True), "2026-01-01T00:00:00.000Z"))
-    db.commit()
-    db.close()
+    rows = [
+        ("orphan-briefing", "briefing", json.dumps({"title": "Orphan", "company": c1, "sources": [{"id": "gone"}]})),
+        ("uni", "task", json.dumps({"title": "Résumé — \"quoted\" \\ back", "company": c1, "key": "secret/path"}, ensure_ascii=True)),
+    ]
+    if not services.db.is_postgres:  # PostgreSQL's schema rejects non-object documents outright
+        rows.insert(0, ("odd", "task", "[1,2]"))
+    with services.db.write() as session:
+        for record_id, kind, data in rows:
+            session.execute(text("INSERT INTO records (owner, id, kind, data, revision, updated) VALUES (:o, :i, :k, :d, 1, :u)"),
+                            {"o": WS, "i": record_id, "k": kind, "d": data, "u": "2026-01-01T00:00:00.000Z"})
     return {"services": services, "c1": c1, "c2": c2, "scoped": scoped, "client": client_id, "invoice": inv}
 
 
@@ -63,23 +72,24 @@ def reference_state(services, ctx) -> list[dict]:
 def test_state_records_match_the_original_algorithm(busy, actor):
     services = busy["services"]
     actor_id = busy.get(actor, actor)
-    ctx = load_context(services, Principal(WS, actor_id))
-    expected = reference_state(services, load_context(services, Principal(WS, actor_id)))
+    ctx = load_context(services, principal(services, actor_id))
+    expected = reference_state(services, load_context(services, principal(services, actor_id)))
     assert read_state(services, ctx)["records"] == expected
-    fast = json.loads(read_state_json(services, load_context(services, Principal(WS, actor_id))))
+    fast = json.loads(read_state_json(services, load_context(services, principal(services, actor_id))))
     assert fast["records"] == json.loads(json.dumps(expected))
     assert list(fast) == ["records", "actor", "members", "audit", "connections", "local", "date", "eventTemplates"]
     if actor == "owner":
         ids = [r["id"] for r in fast["records"]]
-        assert "orphan-briefing" not in ids and "odd" in ids and all("key" not in r for r in fast["records"])
+        assert "orphan-briefing" not in ids and all("key" not in r for r in fast["records"])
+        assert ("odd" in ids) is (not services.db.is_postgres)  # non-object documents exist only in legacy SQLite data
         assert next(r for r in fast["records"] if r["id"] == "uni")["title"] == "Résumé — \"quoted\" \\ back"
 
 
 def test_portal_company_slice_matches_full_state(busy):
     services = busy["services"]
-    ctx = load_context(services, Principal(WS, "owner"))
+    ctx = load_context(services, principal(services, "owner"))
     full = portal_state(ctx)
-    one = portal_state(load_context(services, Principal(WS, "owner")), only_company=busy["c2"])
+    one = portal_state(load_context(services, principal(services, "owner")), only_company=busy["c2"])
     for key in ("invoices", "payments", "documents", "obligations", "cases", "threads", "requests", "calendar"):
         assert one[key] == [r for r in full[key] if r.get("company") == busy["c2"]], key
 

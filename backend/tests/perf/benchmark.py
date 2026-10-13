@@ -22,6 +22,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy import event
 
+from app.auth import csrf_for
 from app.core.config import Settings
 from app.main import create_app
 from app.repositories.records import RecordRepository
@@ -100,7 +101,8 @@ class Api:
 
     def req(self, method: str, path: str, **kw):
         self.client.cookies.clear()
-        headers = {"cookie": f"{COOKIE}={self.cookie}"} if self.cookie else {}
+        csrf = csrf_for(self.cookie) if self.cookie else "anonymous"
+        headers = {"cookie": (f"{COOKIE}={self.cookie}; " if self.cookie else "") + f"gov_csrf={csrf}", "x-csrf-token": csrf}
         response = self.client.request(method, path, headers=headers, **kw)
         self.client.cookies.clear()
         assert response.status_code < 400, f"{method} {path}: {response.status_code} {response.text[:200]}"

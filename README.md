@@ -8,12 +8,16 @@ React (source: frontend/ → build: .sites-runtime/frontend/)
   ↓  same-origin fetch: /api/v2, /api/v2-files, /api/v2-import, /api/portal, /api/session
 FastAPI (backend/)
   ↓  routers → services → repositories
-SQLAlchemy
+SQLAlchemy + Alembic
   ↓
-SQLite (.sites-runtime/preview/preview.sqlite) + local files (.sites-runtime/preview/files/)
+SQLite (local development: .sites-runtime/preview/preview.sqlite)  or  PostgreSQL (staging/production)
+  + local files (.sites-runtime/preview/files/)
 ```
 
-This is a **local preview**: it runs on `127.0.0.1` only and uses simulated team roles, not production login.
+By default it runs as a **local preview** on `127.0.0.1` with simulated team roles. Real sign-in
+(`GOVERNANCE_AUTH_MODE=password`, [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md)) and PostgreSQL
+(`GOVERNANCE_DATABASE_URL`, [docs/POSTGRESQL.md](docs/POSTGRESQL.md)) are available; staging and
+production require both.
 
 ## Requirements
 
@@ -104,11 +108,13 @@ All of them are listed with explanations in `backend/.env.example`. The main one
 | Variable | Default | Purpose |
 |---|---|---|
 | `GOVERNANCE_ENVIRONMENT` | `development` | Profile: `development`, `test`, `staging`, `production` |
-| `GOVERNANCE_DATA_DIR` | `.sites-runtime/preview` (development) | SQLite database and `files/` folder |
+| `GOVERNANCE_DATABASE_URL` | empty (SQLite file in the data folder) | PostgreSQL URL (`postgresql+psycopg://...`); required in staging/production; secret. Pool settings: `GOVERNANCE_DB_*` |
+| `GOVERNANCE_DATA_DIR` | `.sites-runtime/preview` (development) | SQLite database (when no URL is set) and `files/` folder |
 | `GOVERNANCE_FRONTEND_DIR` | `.sites-runtime/frontend` | Built React app |
 | `HOST` / `PORT` | `127.0.0.1` / `5174` | Address used by `python -m app` |
 | `GOVERNANCE_ALLOWED_HOSTS` | empty | Extra accepted `Host` headers, comma separated |
-| `GOVERNANCE_AUTH_MODE` | `local-preview` | Local sign-in. Any other value disables it, so every API request returns 401 |
+| `GOVERNANCE_AUTH_MODE` | `local-preview` | `local-preview` (development/test only) or `password` (built-in sign-in) |
+| `GOVERNANCE_WORKSPACE_ID` | `local-preview` | Development preview organization (created on first start in development/test) |
 | `GOVERNANCE_SESSION_HOURS` | `12` | Session lifetime |
 | `GOVERNANCE_API_DOCS`, `GOVERNANCE_AUTO_MIGRATE`, `GOVERNANCE_HSTS` | per profile | Override the profile default |
 | `GOVERNANCE_CSP` | built-in policy | Full Content-Security-Policy override |
@@ -119,21 +125,38 @@ All of them are listed with explanations in `backend/.env.example`. The main one
 
 ### Database migrations
 
-The schema is managed with Alembic (`backend/migrations/`). The first revision, `0001_baseline`,
-describes the existing `records`, `audit` and `sessions` tables and their indexes.
+The schema is managed with Alembic (`backend/migrations/`):
+
+- `0001_baseline` describes the existing `records`, `audit` and `sessions` tables and their indexes.
+- `0002_identity_tenancy` adds organizations, users, memberships and company access (see
+  "Organizations, users and access").
+- `0003_authentication` adds credentials, session lifecycle, activation/reset tokens, sign-in
+  throttling and security events (new columns and tables only).
+- `0004_business_uniqueness` adds database-enforced uniqueness for issued invoice numbers, payment
+  references and trial-balance files (it stops, changing nothing, if existing data has duplicates).
+
+Every revision runs on SQLite and PostgreSQL ([docs/POSTGRESQL.md](docs/POSTGRESQL.md)).
 
 ```sh
 cd backend
-.venv/bin/alembic upgrade head                        # database from GOVERNANCE_DATA_DIR
+.venv/bin/alembic upgrade head                        # GOVERNANCE_DATABASE_URL, else the SQLite file in GOVERNANCE_DATA_DIR
 .venv/bin/alembic -x db=/path/to/copy.sqlite upgrade head
-.venv/bin/alembic current                             # shows 0001_baseline (head)
+.venv/bin/alembic -x url=postgresql+psycopg://user:pass@host/db upgrade head
+.venv/bin/alembic current                             # shows 0004_business_uniqueness (head)
 ```
 
 - **New database:** the tables and indexes are created.
 - **Existing database** (from the Node backend or from FastAPI before Alembic): it is adopted. Its tables
   are checked for the expected columns and kept as they are; only missing indexes and Alembic's
   `alembic_version` table are added. No row is read, changed or deleted.
-- **Downgrading** the baseline is refused, because it would drop all data.
+- **Upgrading to `0002`:** each existing tenant key becomes an organization with the same id, and
+  each workspace profile becomes a user plus a membership with the same role, status and company
+  scope. Record ids, file keys and timestamps don't change. The whole upgrade runs in one
+  transaction, DDL included, so a failure leaves the database at `0001`. It stops, without changing
+  anything, on a profile with an unknown role or a Client with access to every company. Company
+  references to companies that don't exist are skipped and listed in the migration log; they granted
+  no access before either.
+- **Downgrading** is refused for 0001–0003, because it would drop data. Restore a backup instead.
 - To try a migration on real data, use a copy (`-x db=...`), never the live file.
 
 ### Health checks
@@ -164,9 +187,14 @@ balancer can probe them.
 ```sh
 cd backend && source .venv/bin/activate
 
-python -m pytest                              # API, rules, security, existing data, query paths, scaling, Phase 1 foundation
+python -m pytest                              # whole suite on SQLite, plus the PostgreSQL-specific tests
+GOVERNANCE_TEST_DATABASE=postgres python -m pytest   # whole suite on PostgreSQL
 GOVERNANCE_E2E=1 python -m pytest tests/e2e   # React app in Chrome against a throwaway FastAPI server
 ```
+
+PostgreSQL tests use `GOVERNANCE_TEST_POSTGRES_URL` (an administrator URL; tests create and drop
+their own databases) or, if it is unset, start a throwaway local cluster from the installed
+PostgreSQL binaries. Without either they are skipped.
 
 From the project folder:
 
@@ -184,7 +212,78 @@ pnpm 11.19.0:
 
 1. Installs dependencies (`pnpm install --frozen-lockfile`, `pip install -r backend/requirements-dev.txt`).
 2. Runs the frontend typecheck and build.
-3. Runs the backend tests, the 325 compatibility checks and the browser tests.
+3. Applies the migrations to a fresh SQLite database, upgrades one from the first revision, and
+   applies them to a fresh PostgreSQL database (a `postgres:16` service container).
+4. Runs the identity, tenant-isolation and authentication tests, then the full backend suite on
+   SQLite and again on PostgreSQL.
+5. Runs the 325 compatibility checks on SQLite and on PostgreSQL, and the browser tests.
+
+## Organizations, users and access
+
+Each corporate-services firm is an **organization**. Its id is the tenant key stored on every record,
+audit entry and file key, so one organization's data is never in another's queries.
+
+| Table | Holds |
+|---|---|
+| `organizations` | id, name, status (`active`/`inactive`), created/updated timestamps |
+| `users` | a person: display name, optional email (unique, case-insensitive), status. No passwords yet |
+| `organization_memberships` | user ↔ organization with a role (`Owner`, `Secretary`, `Accountant`, `Director`, `Auditor`, `Client`), status, and either all companies or listed ones. One membership per user per organization |
+| `company_access` | the companies a membership may see. Foreign keys tie it to a company of the **same** organization |
+
+**How a request is authorized:**
+
+1. The session cookie maps to a server-side session bound to one membership.
+2. The organization, user and membership must all be active.
+3. The role and company scope come from the membership tables.
+
+Nothing the browser sends (headers, body fields, record ids) selects the organization. An id from
+another organization simply isn't found (404). The workspace profile records (kind `member`) remain
+the display profiles that the React app and business records use. Every code path that creates a
+profile writes its membership in the same transaction, and authorization reads only the membership.
+
+**Database guards** (SQLite triggers; on PostgreSQL foreign keys plus triggers):
+
+- a record or audit entry must belong to an existing organization, and can never move to another one
+- company access must point to a company record
+- a session must match its membership
+
+**Files** are only read through their organization's key prefix, so a record that points at another
+organization's key still gets 404. **Audit entries** are scoped to the organization; new ones also
+store the acting membership (older entries keep `NULL`). **Reminders** run for every active
+organization, each with its own queries. A database lease (`background_leases`) makes sure only one
+application process runs each pass.
+
+**Development preview:**
+
+- Opening the app signs in as the Owner of the preview organization (`GOVERNANCE_WORKSPACE_ID`).
+- "Preview as" switches to another active membership of the **same** organization.
+- Both are refused in staging and production.
+- Real sign-in arrives in Phase 3, through the same sessions.
+
+### Role permissions (enforced on the server; unchanged by Phase 2)
+
+| Capability | Owner | Secretary | Accountant | Director | Auditor | Client |
+|---|---|---|---|---|---|---|
+| Sees companies | all | per access | per access | per access | per access | listed only; no internal work |
+| Create and edit work (tasks, meetings, closes, events, requests, submissions, companies) | ✓ | ✓ | ✓ | – | – | – |
+| Approve work (never their own) | ✓ | ✓ | – | ✓ | – | – |
+| Prepare rules / publish rules (a different person) / generate | ✓/✓/✓ | ✓/✓/✓ | – | –/✓/– | – | – |
+| Upload documents / share with the portal | ✓/✓ | ✓/✓ | ✓/– | ✓/– | – | new evidence only |
+| Import / review trial balances | ✓/✓ | ✓/✓ | ✓/✓ | – | – | – |
+| Submissions, reminders, email dispatch | ✓ | ✓ | – | – | – | – |
+| Evidence packs / briefings / CSV export | ✓/✓/✓ | ✓/✓/✓ | –/✓/✓ | ✓/✓/✓ | ✓/–/✓ | – |
+| Portal staff actions (onboarding, compliance, invoices, confirm payments) | ✓ | ✓ | ✓ | – | – | – |
+| Portal: own companies, messages, report payments | ✓ | ✓ | ✓ | – | – | ✓ |
+| Team management | ✓ | – | – | – | – | – |
+| Audit trail | ✓ | if all companies | if all companies | if all companies | if all companies | – |
+
+**Known role conflicts (existing behaviour, kept as is; these are product decisions):**
+
+- Auditors can add comments, so the role isn't strictly read-only.
+- Directors can approve work but can't edit it, and have no portal actions.
+- The same staff member can report and confirm a payment.
+- "Preparer" means the last person to edit a record.
+- Owner memberships can't be created through the API: each organization has one Owner.
 
 ## API reads and performance
 
@@ -208,13 +307,14 @@ cd backend
 .venv/bin/python -m pytest tests/perf                        # guard: cost must not grow with unrelated records
 ```
 
-## Sign-in and roles (local preview)
+## Sign-in and roles
 
-- **Signing in:** opening the app page signs the browser in as the workspace owner. The session is a server-side record in `sessions`, and the cookie is HttpOnly and SameSite=Strict.
-- **Switching profile:** **Preview as** issues a new session for another active profile.
-- **No session:** API calls return **401**. A missing or unknown cookie never falls back to the Owner.
-- **Permissions:** the server checks the role and company scope on every request, whatever the UI shows.
-- **Where this lives:** all of the above is in `backend/app/auth/`, so production authentication can replace it there.
+Two sign-in modes (`GOVERNANCE_AUTH_MODE`), described in full in [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md):
+
+- **`local-preview`** (development/test default): opening the app signs the browser in as the Owner of the preview organization; **Preview as** switches to another active membership of the same organization. Refused in staging/production.
+- **`password`**: email + password sign-in (argon2id), invitations from **Team & access**, password reset, sign-out (and sign-out everywhere), idle and absolute session expiry, login throttling, CSRF tokens. The first owner is created with `python -m app.cli create-organization` (password typed at a hidden prompt, never invented).
+- **No session:** API calls return **401**. A missing, unknown, expired or revoked cookie never falls back to the Owner.
+- **Permissions:** the server checks the role and company scope on every request, whatever the UI shows; role and organization are never taken from the browser.
 
 ## Project layout
 

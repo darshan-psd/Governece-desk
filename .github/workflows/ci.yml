@@ -20,6 +20,16 @@ jobs:
     timeout-minutes: 30
     # No GOVERNANCE_* variables here: every suite starts its own servers with the "test" profile
     # and temporary data directories (see backend/tests/conftest.py and scripts/run-compat-tests.mjs).
+    # The PostgreSQL service is only reached by the steps that name it (tests create and drop their
+    # own databases on it).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
 
@@ -58,12 +68,51 @@ jobs:
         working-directory: backend
         run: .venv/bin/alembic -x db="$RUNNER_TEMP/ci-migration.sqlite" upgrade head && .venv/bin/alembic -x db="$RUNNER_TEMP/ci-migration.sqlite" current
 
-      - name: Backend tests (pytest)
+      - name: Migrations upgrade a database from the previous revision
         working-directory: backend
-        run: .venv/bin/python -m pytest
+        run: |
+          .venv/bin/alembic -x db="$RUNNER_TEMP/ci-upgrade.sqlite" upgrade 0001_baseline
+          .venv/bin/alembic -x db="$RUNNER_TEMP/ci-upgrade.sqlite" upgrade head
+          .venv/bin/alembic -x db="$RUNNER_TEMP/ci-upgrade.sqlite" current | grep -q "(head)"
+
+      - name: Migrations apply to a fresh PostgreSQL database
+        working-directory: backend
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -c "CREATE DATABASE ci_migrations"
+          .venv/bin/alembic -x url="postgresql+psycopg://postgres:postgres@localhost:5432/ci_migrations" upgrade head
+          .venv/bin/alembic -x url="postgresql+psycopg://postgres:postgres@localhost:5432/ci_migrations" current | grep -q "(head)"
+
+      - name: Identity, tenant-isolation and authentication tests
+        working-directory: backend
+        env:
+          GOVERNANCE_TEST_POSTGRES_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+        run: .venv/bin/python -m pytest tests/test_tenancy.py tests/test_identity_migration.py tests/test_auth.py -rs
+
+      - name: Backend tests (pytest, full suite on SQLite + PostgreSQL-specific tests)
+        working-directory: backend
+        env:
+          GOVERNANCE_TEST_POSTGRES_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+        run: .venv/bin/python -m pytest -rs
+
+      - name: Backend tests (full suite on PostgreSQL)
+        working-directory: backend
+        env:
+          GOVERNANCE_TEST_DATABASE: postgres
+          GOVERNANCE_TEST_POSTGRES_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+        run: .venv/bin/python -m pytest -rs
 
       - name: Compatibility checks (original 325 API checks against FastAPI)
         run: pnpm test:compat
+
+      - name: Compatibility checks on PostgreSQL
+        env:
+          PGPASSWORD: postgres
+          GOVERNANCE_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/ci_compat
+        run: |
+          psql -h localhost -U postgres -c "CREATE DATABASE ci_compat"
+          pnpm test:compat
 
       - name: Browser tests (React app against FastAPI, system Chrome)
         working-directory: backend

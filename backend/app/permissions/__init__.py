@@ -78,9 +78,16 @@ class WorkspaceStore:
 class Context:
     """Who is acting, in which workspace, and a query-backed view of the workspace's records."""
 
-    owner: str
+    owner: str  # organization id: the tenant key of every record and audit query
     actor: dict
     store: WorkspaceStore = field(repr=False, default=None)  # type: ignore[assignment]
+    membership_id: str | None = None
+    user_id: str | None = None
+    must_change_password: bool = False
+
+    @property
+    def organization_id(self) -> str:
+        return self.owner
 
     @property
     def role(self) -> str:

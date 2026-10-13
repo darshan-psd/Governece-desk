@@ -3,11 +3,15 @@ import hashlib
 import json
 import sqlite3
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from app.core.config import PROJECT_DIR
 from app.main import create_app
 from tests.conftest import Api
+
+pytestmark = pytest.mark.sqlite_only  # SQLite files, adoption and query plans
 
 MIGRATION = PROJECT_DIR / "drizzle" / "0000_redundant_luke_cage.sql"
 

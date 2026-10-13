@@ -3,9 +3,10 @@
 Every query is scoped to one workspace (``owner``). Services receive plain dicts shaped like
 the Node backend's records: ``{...data, id, kind, revision, updated}``.
 
-Records keep their fields in the JSON ``data`` column. Filters on those fields use
-``json_extract(data, '$.<field>')`` with a literal path, so they can use the expression indexes
-declared in ``app.models`` (a bound-parameter path would not match an index).
+Records keep their fields in the JSON ``data`` column (TEXT on SQLite, JSONB on PostgreSQL).
+Filters on those fields use ``app.models.json_field`` with a literal path, so they can use the
+expression indexes declared in ``app.models`` (a bound-parameter path would not match an index).
+The SQL that differs between the two databases lives in ``app.database.dialect``.
 """
 from __future__ import annotations
 
@@ -14,19 +15,19 @@ import re
 import uuid
 from typing import Any, Iterable, Sequence
 
-from sqlalchemy import ColumnElement, and_, case, func, literal_column, select, text, update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import ColumnElement, Text, and_, case, cast, func, literal_column, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.errors import BadRequest
-from app.core.jsvalues import now_iso
+from app.core.errors import BadRequest, Conflict
+from app.core.jsvalues import now_iso, without_nul
+from app.database.dialect import POSTGRES, insert_for, insertion_order, json_array_contains, name_of, owner_column
 from app.models import AuditEvent, Record, json_field
 
 # Columns overlay the JSON fields, exactly like the Node backend's row mapping.
 COLUMN_KEYS = ("id", "kind", "revision", "updated")
 COLUMNS = (Record.id, Record.kind, Record.data, Record.revision, Record.updated)
-ROWID = literal_column("records.rowid")
+ROWID = insertion_order("records")  # rowid on SQLite, the seq identity column on PostgreSQL
 # Newest first. Ties keep the order the original query produced (it read rows through the
 # (owner, kind) index, so equal timestamps came out by kind, then insertion order).
 ORDER = (Record.updated.desc(), Record.kind.asc(), ROWID.asc())
@@ -35,8 +36,30 @@ BATCH = 500
 _FIELD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
+# Business uniqueness enforced by the database (migration 0004): index name → conflict message.
+UNIQUE_RULES = {
+    "ux_records_invoice_number": "Invoice number already issued or record changed.",
+    "ux_records_payment_reference": "This transaction reference has already been reported.",
+    "ux_records_trialbalance_file": "This file has already been imported for this company, period and currency.",
+}
+
+
+def business_conflict(error: IntegrityError) -> Conflict | None:
+    """The 409 for a violated business uniqueness index, or None for any other integrity error."""
+    message = str(getattr(error, "orig", error))
+    for index, text_ in UNIQUE_RULES.items():
+        if index in message:
+            return Conflict(text_)
+    return None
+
+
 def dumps(data: Any) -> str:
-    return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    """Compact JSON. NUL characters are removed from text (PostgreSQL JSONB cannot store them, and
+    no business field can legitimately contain one), so both databases store the same document."""
+    encoded = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    if "\\u0000" in encoded:
+        encoded = json.dumps(without_nul(data), separators=(",", ":"), ensure_ascii=False)
+    return encoded
 
 
 def row_to_dict(record_id: str, kind: str, data: str, revision: int, updated: str) -> dict:
@@ -82,7 +105,7 @@ class RecordRepository:
         test is then written ``+owner`` (SQLite's documented way to keep a term from choosing the
         index) so the rowid list drives the query instead of a scan of the whole workspace.
         """
-        owner = literal_column("+records.owner") if rowid_driven else Record.owner
+        owner = owner_column(True) if rowid_driven else Record.owner
         conditions: list[ColumnElement] = [owner == self.owner]
         if kinds is not None:
             kinds = list(kinds)
@@ -112,7 +135,7 @@ class RecordRepository:
 
     # Reads -------------------------------------------------------------------------------
     def find(self, *, order: bool = True, limit: int | None = None, offset: int = 0, order_by=None, **filters) -> list[dict]:
-        """Records matching the filters, filtered and ordered by SQLite (newest first by default)."""
+        """Records matching the filters, filtered and ordered by the database (newest first by default)."""
         statement = self._select(COLUMNS, self._conditions(**filters), order=order, limit=limit, offset=offset, order_by=order_by)
         return [row_to_dict(*row) for row in self.session.execute(statement)]
 
@@ -145,10 +168,19 @@ class RecordRepository:
         return found
 
     def json_rows(self, **filters) -> list[tuple[str, str, str]]:
-        """``(kind, id, record JSON)`` with the column fields merged and ``key`` removed by SQLite.
+        """``(kind, id, record JSON)`` with the column fields merged and ``key`` removed by the database.
 
         Used by full-state responses so Python does not parse and re-serialise every record.
         """
+        if name_of(self.session) == POSTGRES:
+            # JSONB is always parsed: drop "key", overlay the column fields, render as text.
+            base = case((func.jsonb_typeof(Record.data) != "object", literal_column("'{}'::jsonb")),
+                        else_=Record.data.op("-")(literal_column("'key'")))
+            overlay = func.jsonb_build_object(literal_column("'id'"), Record.id, literal_column("'kind'"), Record.kind,
+                                              literal_column("'revision'"), Record.revision, literal_column("'updated'"), Record.updated)
+            record_json = cast(base.op("||")(overlay), Text)
+            statement = self._select((Record.kind, Record.id, record_json), self._conditions(**filters))
+            return [tuple(row) for row in self.session.execute(statement)]
         # Non-object data becomes {} (as row_to_dict does) and ``key`` (storage path) is never
         # returned. Both tests avoid a full JSON parse where possible: stored objects start with
         # "{", and json_remove only runs when the text mentions "key" at all.
@@ -174,38 +206,48 @@ class RecordRepository:
         try:
             self.session.flush()
         except IntegrityError as error:
-            raise BadRequest("A record with this identifier already exists.") from error
+            raise (business_conflict(error) or BadRequest("A record with this identifier already exists.")) from error
 
     def insert_or_ignore(self, record_id: str, kind: str, data: dict) -> bool:
         statement = (
-            sqlite_insert(Record)
+            insert_for(self.session, Record)
             .values(owner=self.owner, id=record_id, kind=kind, data=dumps(data), revision=1, updated=self.stamp)
             .on_conflict_do_nothing()
+            .returning(Record.id)  # rowcount is not reliable for INSERT on every driver
         )
-        return self.session.execute(statement).rowcount == 1
+        return self.session.execute(statement).first() is not None
 
     def update_if_revision(self, record_id: str, revision: int, data: dict, touch: bool = True) -> bool:
         """Optimistic locking: writes only when the stored revision still matches."""
         values: dict[str, Any] = {"data": dumps(data), "revision": Record.revision + 1}
         if touch:
             values["updated"] = self.stamp
-        result = self.session.execute(
-            update(Record)
-            .where(Record.owner == self.owner, Record.id == record_id, Record.revision == revision)
-            .values(**values)
-            .execution_options(synchronize_session=False)
-        )
+        try:
+            result = self.session.execute(
+                update(Record)
+                .where(Record.owner == self.owner, Record.id == record_id, Record.revision == revision)
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            )
+        except IntegrityError as error:
+            conflict = business_conflict(error)
+            if conflict is None:
+                raise
+            raise conflict from error
         return result.rowcount == 1
 
     def patch_where(self, kinds: Iterable[str], patch: dict, *, where: dict[str, Any] | None = None,
                     evidence_contains: str | None = None) -> int:
         """Merges ``patch`` into every matching record (revision + 1, ``updated`` unchanged).
 
-        Mirrors the Node backend's ``json_set`` bulk updates. Matching happens in SQLite.
+        Mirrors the Node backend's ``json_set`` bulk updates. Matching happens in the database.
+        The rows are locked while they are rewritten (``FOR UPDATE`` on PostgreSQL; SQLite's writer
+        lock already serialises writes), so a concurrent edit is never overwritten: it either commits
+        first and is merged into, or waits and then fails its revision check (409).
         """
-        extra = [evidence_sql(evidence_contains)] if evidence_contains is not None else []
+        extra = [evidence_sql(evidence_contains, name_of(self.session))] if evidence_contains is not None else []
         rows = self.session.execute(select(Record.id, Record.data, Record.revision).where(
-            and_(*self._conditions(kinds=kinds, where=where, extra=extra)))).all()
+            and_(*self._conditions(kinds=kinds, where=where, extra=extra))).with_for_update()).all()
         for record_id, data, revision in rows:
             merged = json.loads(data)
             merged.update(patch)
@@ -216,27 +258,31 @@ class RecordRepository:
         return len(rows)
 
 
-def evidence_sql(document_id: str) -> ColumnElement:
-    """True when the record's ``evidence`` array contains ``document_id``."""
-    # json_type guard: only real arrays count, exactly like the Python ``as_list()`` check.
-    return text(
-        "json_type(records.data, '$.evidence') = 'array' AND "
-        "EXISTS (SELECT 1 FROM json_each(records.data, '$.evidence') WHERE json_each.value = :evidence_doc)"
-    ).bindparams(evidence_doc=document_id)
+def evidence_sql(document_id: str, dialect: str = "sqlite") -> ColumnElement:
+    """True when the record's ``evidence`` array contains ``document_id`` (only real arrays count,
+    exactly like the Python ``as_list()`` check)."""
+    return text(json_array_contains(dialect, "records.data", "evidence", "evidence_doc")).bindparams(evidence_doc=document_id)
 
 
 class AuditRepository:
     # Newest first; equal timestamps in reverse insertion order (the audit_owner_at index scanned backwards).
-    ORDER = (AuditEvent.at.desc(), literal_column("audit.rowid").desc())
+    ORDER = (AuditEvent.at.desc(), insertion_order("audit").desc())
 
-    def __init__(self, session: Session, owner: str):
+    def __init__(self, session: Session, owner: str, actor_membership_id: str | None = None):
         self.session = session
         self.owner = owner
+        self.actor_membership_id = actor_membership_id
+
+    @classmethod
+    def of(cls, session: Session, ctx) -> "AuditRepository":
+        """Audit writer for a request: the organization and acting membership come from the session."""
+        return cls(session, ctx.owner, getattr(ctx, "membership_id", None))
 
     def add(self, action: str, subject: Any) -> None:
         self.session.add(
             AuditEvent(id=str(uuid.uuid4()), owner=self.owner, action=action,
-                       subject="" if subject is None else str(subject), at=now_iso())
+                       subject="" if subject is None else str(subject), at=now_iso(),
+                       actor_membership_id=self.actor_membership_id)
         )
         self.session.flush()
 

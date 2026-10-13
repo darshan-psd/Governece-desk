@@ -14,6 +14,7 @@ from app.domain.workflow_rules import escape_html
 from app.permissions import Context
 from app.services.portal.common import company
 from app.services.portal.state import portal_state
+from app.storage import tenant_key
 
 MAX_BUNDLE_FILES = 200
 MAX_BUNDLE_BYTES = 100 * 1024 * 1024
@@ -46,7 +47,8 @@ def _bundle(services: Services, ctx: Context, c: dict) -> Download:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
         for d in docs:
-            content = services.storage.get(d.get("key") or "")
+            key = tenant_key(ctx.owner, d.get("key"))
+            content = services.storage.get(key) if key else None
             if content is None:
                 raise BadRequest(f"A published file is unavailable: {d.get('name')}. Contact the secretary.")
             folder = re.sub(r"[^\w &-]", "_", d.get("category") or "Other", flags=re.ASCII)

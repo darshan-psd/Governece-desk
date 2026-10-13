@@ -18,6 +18,7 @@ from app.domain.portal_domain import DOCUMENT_CATEGORIES
 from app.permissions import Context, accessible, authorize
 from app.repositories.records import AuditRepository, RecordRepository
 from app.services.context import audit_label, save
+from app.storage import tenant_key
 
 MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_BYTES = 1024 * 1024
@@ -98,7 +99,7 @@ def upload_document(services: Services, ctx: Context, form: dict, file: Incoming
                 if not repo.update_if_revision(parent["id"], parent["revision"], {**parent, "supersededBy": document_id}, touch=False):
                     raise Conflict("The document changed during upload. Refresh and retry.")
             repo.insert(document_id, "document", data)
-            AuditRepository(session, ctx.owner).add(audit_label(ctx, "Uploaded document"), file.name)
+            AuditRepository.of(session, ctx).add(audit_label(ctx, "Uploaded document"), file.name)
             if parent:
                 # Work approved against the old version must be reviewed again.
                 # Evidence always belongs to the record's own company (enforced when it is linked).
@@ -113,7 +114,8 @@ def download_document(services: Services, ctx: Context, document_id: str | None)
     doc = ctx.find(document_id, "document")
     if doc is None or not accessible(ctx, doc):
         raise NotFound("Document not found.")
-    content = services.storage.get(doc.get("key") or "")
+    key = tenant_key(ctx.owner, doc.get("key"))
+    content = services.storage.get(key) if key else None
     if content is None:
         raise NotFound("File bytes are unavailable in this local workspace.")
     return doc, content
@@ -158,7 +160,7 @@ def import_trial_balance(services: Services, ctx: Context, form: dict, file: Inc
         with services.db.write() as session:
             repo = RecordRepository(session, ctx.owner)
             repo.insert(import_id, "trialbalance", data)
-            AuditRepository(session, ctx.owner).add(audit_label(ctx, "Imported trial balance"), file.name)
+            AuditRepository.of(session, ctx).add(audit_label(ctx, "Imported trial balance"), file.name)
             if previous:
                 # A close linked to the previous import must be reviewed against the new version.
                 repo.patch_where(("close",), {"reviewRequired": True}, where={"company": company, "trialbalance": previous["id"]})

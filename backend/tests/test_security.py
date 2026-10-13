@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from tests.conftest import COOKIE, Api
+from tests.conftest import COOKIE, Api, browser_headers
 
 
 @pytest.fixture
@@ -34,7 +34,9 @@ def setup(api):
 ])
 def test_requests_without_a_session_are_rejected(client, method, path):
     client.cookies.clear()
-    response = client.request(method, path, json={"action": "initialise"} if method == "POST" else None)
+    # A valid anonymous CSRF pair (as the sign-in page holds): the request is refused for lack of a session.
+    response = client.request(method, path, json={"action": "initialise"} if method == "POST" else None,
+                              headers=browser_headers(method))
     assert response.status_code == 401
     assert response.json() == {"error": "Please sign in to access your workspace."}
 
@@ -61,12 +63,12 @@ def test_opening_the_app_issues_a_secure_owner_session(client):
     assert signed_in.state()["actor"]["id"] == "secretary"
 
 
-def test_local_sign_in_can_be_disabled(settings):
+def test_local_sign_in_is_off_in_password_mode(settings):
     from fastapi.testclient import TestClient
 
     from app.main import create_app
 
-    settings.governance_auth_mode = "disabled"
+    settings.governance_auth_mode = "password"
     with TestClient(create_app(settings), base_url="http://testserver") as test_client:
         response = test_client.get("/")
         assert COOKIE not in response.cookies
@@ -136,6 +138,19 @@ def test_roles_are_enforced_server_side(setup):
     api.portal({"action": "annualPlan", "company": c, "period": "2026-27"}, 403)
 
 
+def test_clients_cannot_be_assigned_internal_work(setup):
+    """A Client can never be the ``assignee`` of a task/meeting/close/event: they could never even
+    see it (``accessible()`` hides every one of those kinds from a Client). A ``request`` is the
+    exception — that's the client-response workflow, where the assignee is routinely the Client."""
+    api, c, client, today = setup["api"], setup["c"], setup["client"], setup["today"]
+    error = api.v2({"action": "create", "kind": "task", "data": {"company": c, "title": "T", "due": today, "assignee": client}}, 400)["error"]
+    assert "assignee" in error.lower()
+    # Swapping an existing task onto a Client is refused the same way.
+    api.edit(setup["task"], {"assignee": client}, 400)
+    # The client-request workflow is unaffected: a Client can still be assigned a request.
+    assert api.create("request", {"company": c, "title": "R", "due": today, "assignee": client})
+
+
 # 5. Unauthorized document downloads ------------------------------------------------------------
 
 def test_document_downloads_respect_sharing_and_company_scope(setup):
@@ -198,10 +213,10 @@ def test_stale_revision_is_rejected(setup):
 def test_parallel_edits_only_one_wins(setup, client):
     api = setup["api"]
     record = api.get(setup["task"])
-    cookie = f"{COOKIE}={api.cookie}"
+    headers = browser_headers("POST", api.cookie)
 
     def attempt(n: int) -> int:
-        return client.post("/api/v2", headers={"cookie": cookie}, json={
+        return client.post("/api/v2", headers=headers, json={
             "action": "edit", "id": record["id"], "revision": record["revision"], "data": {"title": f"Writer {n}"},
         }).status_code
 
@@ -218,16 +233,67 @@ def test_parallel_invoice_issue_keeps_numbers_unique(setup, client):
     api.portal({"action": "companySave", "id": c, "revision": api.get(c)["revision"], "data": {"name": "Client company", "address": "1 Road"}})
     invoices = [api.portal({"action": "invoiceCreate", "company": c, "data": data})["id"] for _ in range(4)]
     revisions = {i["id"]: i["revision"] for i in api.portal()["invoices"]}
-    cookie = f"{COOKIE}={api.cookie}"
+    headers = browser_headers("POST", api.cookie)
 
     def issue(invoice_id: str) -> int:
-        return client.post("/api/portal", headers={"cookie": cookie}, json={
+        return client.post("/api/portal", headers=headers, json={
             "action": "invoiceIssue", "company": c, "id": invoice_id, "revision": revisions[invoice_id],
         }).status_code
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         statuses = list(pool.map(issue, invoices))
     assert statuses.count(200) == 1 and statuses.count(409) == 3
+
+
+# 8. Approved RBAC policy: company creation and Team & Access visibility -----------------------
+
+def test_company_creation_matches_approved_policy(setup):
+    """Decision 1: Owner/Secretary/Accountant may create companies; no one else; no auto-grant;
+    only the Owner can hand out company access afterwards."""
+    api, c = setup["api"], setup["c"]
+    for role in ("director", "auditor", setup["client"]):
+        api.role(role)
+        api.create("company", {"name": "Should not exist"}, 403)
+    api.role("owner")
+    scoped = api.v2({"action": "member", "name": "Scoped accountant", "role": "Accountant", "companies": [c]})["id"]
+    api.role(scoped)
+    new_company = api.create("company", {"name": "New Co"})
+    assert new_company
+    # Creating it does not grant the creator access: they can neither see nor edit it.
+    assert api.get(new_company) is None
+    api.v2({"action": "edit", "id": new_company, "revision": 1, "data": {"name": "Renamed"}}, 404)
+    api.role("owner")
+    assert api.get(new_company)["name"] == "New Co"
+    # Only the Owner can extend company access (here, via the Owner-only member-creation action).
+    api.v2({"action": "member", "name": "Needs access", "role": "Secretary", "companies": [new_company]})
+    api.role("auditor")
+    api.create("company", {"name": "Still blocked"}, 403)
+
+
+def test_team_roster_is_owner_only(setup):
+    """Decision 2: the Team & Access roster (role + full company-access map) is Owner-only, even
+    through the general workspace-state API; other roles keep just enough to resolve assignee
+    names and filter who they may assign within companies they can already see."""
+    api, c, c2 = setup["api"], setup["c"], setup["c2"]
+    owner_view = next(m for m in api.state()["members"] if m["id"] == "secretary")
+    assert owner_view["role"] == "Secretary" and owner_view["companies"] == ["*"]
+
+    scoped = api.v2({"action": "member", "name": "Scoped secretary", "role": "Secretary", "companies": [c]})["id"]
+    api.role(scoped)
+    members = api.state()["members"]
+    assert members and all("role" not in m for m in members)
+    org_wide_staff = next(m for m in members if m["id"] == "accountant")  # really companies=["*"]
+    assert org_wide_staff["companies"] == [c]  # capped to this viewer's own scope, not the real value
+    assert all(c2 not in (m.get("companies") or []) for m in members)
+    assert api.request("GET", "/api/auth/team").status_code == 403
+    assert api.request("POST", "/api/auth/team/invite", json={"member": "owner", "email": "x@test.example"}).status_code == 403
+    assert api.request("POST", "/api/auth/team/status", json={"member": "owner", "status": "inactive"}).status_code == 403
+
+    api.role("director")  # org-wide ("*") scope, still not Owner
+    assert all("role" not in m for m in api.state()["members"])
+
+    api.role("owner")
+    assert next(m for m in api.state()["members"] if m["id"] == "secretary")["role"] == "Secretary"
 
 
 # Transport guards (ported from local/server.ts) ------------------------------------------------

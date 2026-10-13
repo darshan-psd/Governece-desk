@@ -17,6 +17,8 @@ from app.main import create_app
 from app.repositories.records import RecordRepository
 from tests.perf.benchmark import Api, Probe, build_target, seed
 
+pytestmark = pytest.mark.sqlite_only  # SQLite files, adoption and query plans
+
 SMALL, LARGE = 500, 20000
 
 

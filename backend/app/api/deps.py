@@ -11,6 +11,7 @@ from starlette.concurrency import run_in_threadpool
 from app.auth import require_principal
 from app.core.container import Services
 from app.core.errors import BadRequest
+from app.core.jsvalues import without_nul
 from app.permissions import Context
 from app.services.context import load_context
 
@@ -36,7 +37,10 @@ async def json_body(request: Request) -> dict:
         body: Any = json.loads(raw or b"null")
     except ValueError:
         raise BadRequest("The request body must be valid JSON.") from None
-    return body if isinstance(body, dict) else {}
+    if not isinstance(body, dict):
+        return {}
+    # JSON can only carry NUL as the escape \u0000 (raw control characters are rejected above).
+    return without_nul(body) if b"\\u0000" in raw else body
 
 
 def json_response(content: Any, no_store: bool = False) -> JSONResponse:

@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
 from app.api.deps import context_of, json_response, services_of
+from app.core.jsvalues import without_nul
 from app.services import documents_service
 from app.services.documents_service import IncomingFile
 
@@ -22,9 +23,9 @@ async def _read_form(request: Request) -> tuple[dict, IncomingFile | None]:
     for key, value in form.multi_items():
         if isinstance(value, UploadFile):
             if key == "file" and incoming is None:
-                incoming = IncomingFile(name=value.filename or "", content=await value.read())
+                incoming = IncomingFile(name=without_nul(value.filename or ""), content=await value.read())
         else:
-            fields.setdefault(key, value)
+            fields.setdefault(key, without_nul(value))
     return fields, incoming
 
 

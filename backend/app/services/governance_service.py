@@ -32,7 +32,7 @@ def meeting_action(services: Services, ctx: Context, body: dict, r: dict) -> dic
         RecordRepository(session, ctx.owner).insert(task_id, "task", {
             **data, "status": "Not started", "meeting": r["id"], "preparer": ctx.actor["id"], "evidence": [], "created": now_iso(),
         })
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Created meeting action"), data["title"])
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Created meeting action"), data["title"])
     return {"ok": True, "id": task_id}
 
 
@@ -56,7 +56,7 @@ def pack(services: Services, ctx: Context, body: dict, r: dict) -> dict:
             "title": f"{r.get('title')} · evidence pack", "company": r.get("company"), "snapshot": snapshot,
             "status": "Snapshot", "sourceId": r["id"],
         })
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Generated evidence pack"), r.get("title"))
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Generated evidence pack"), r.get("title"))
     return {"ok": True, "id": pack_id}
 
 
@@ -189,7 +189,7 @@ def generate(services: Services, ctx: Context, body: dict, r: dict) -> dict:
                 "preparer": ctx.actor["id"], "evidence": [],
                 "rule": {"id": r["id"], "version": r.get("ruleVersion"), "anchor": p["anchor"], "source": r.get("source")},
             })
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Generated recurring obligations"), r.get("title"))
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Generated recurring obligations"), r.get("title"))
     return {"ok": True, "count": len(plan)}
 
 

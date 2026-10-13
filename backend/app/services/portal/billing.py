@@ -39,7 +39,7 @@ def invoice_create(services: Services, ctx: Context, body: dict, c: dict) -> dic
             "buyer": {"name": c.get("name"), "address": c.get("billingAddress") or c.get("address") or "", "gstin": c.get("gstin") or ""},
             "createdBy": ctx.actor["id"],
         })
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Drafted invoice"), c.get("name"))
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Drafted invoice"), c.get("name"))
     return {"ok": True, "id": invoice_id}
 
 
@@ -59,7 +59,7 @@ def invoice_issue(services: Services, ctx: Context, body: dict, c: dict) -> dict
         )
         if taken or not repo.update_if_revision(r["id"], r["revision"], {**r, "status": "Issued", "issuedAt": now_iso()}):
             raise Conflict("Invoice number already issued or record changed.")
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Issued INR invoice"), r["number"])
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Issued INR invoice"), r["number"])
     return {"ok": True}
 
 
@@ -106,7 +106,7 @@ def payment_report(services: Services, ctx: Context, body: dict, c: dict) -> dic
             "evidence": ids, "status": "Pending verification", "reportedBy": ctx.actor["id"], "reportedName": ctx.actor.get("name"),
             "created": now_iso(),
         })
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Reported payment for verification"), inv.get("number"))
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Reported payment for verification"), inv.get("number"))
     return {"ok": True, "id": payment_id}
 
 

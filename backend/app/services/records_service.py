@@ -14,15 +14,18 @@ from sqlalchemy import text as sql_text
 
 from app.core.container import Services
 from app.core.errors import BadRequest, Forbidden
+from app.database.dialect import POSTGRES
 from app.core.jsvalues import as_list, now_iso, prop, text, today, truthy
 from app.domain.workflow_rules import (
     EDIT_ROLES, EVENT_TEMPLATES, REVIEW_ROLES, can_access, review_problems, validate_record,
 )
 from app.permissions import Context, accessible, authorize, client_safe, prefetch_briefing_sources
 from app.models import Record
+from app.repositories.identity import IdentityRepository
 from app.repositories.records import ORDER, AuditRepository, RecordRepository, field
 from app.schemas import Page, RecordQuery
 from app.services.context import audit_label, save, visibility_filters
+from app.services.identity_service import add_member, apply_new_credentials, prepare_new_credentials
 
 DEMO_PROFILES = [
     {"id": "owner", "name": "Workspace owner", "role": "Owner", "companies": ["*"]},
@@ -58,14 +61,27 @@ def _companies(member: dict) -> list:
     return as_list(member.get("companies"))
 
 
+def _visible_member(member: dict, actor_companies: list) -> dict:
+    """Team & Access (role, full company-access) is Owner-only; other roles still need enough of
+    this record to resolve assignee names and to filter who can be assigned within companies they
+    themselves can already see."""
+    companies = _companies(member)
+    out = {k: v for k, v in member.items() if k != "role"}
+    if "*" not in actor_companies:
+        out["companies"] = actor_companies if "*" in companies else [c for c in companies if c in actor_companies]
+    return out
+
+
 def _state_meta(services: Services, ctx: Context) -> dict:
     """Everything in the workspace state except ``records`` (same keys and order as before)."""
     actor_companies = _companies(ctx.actor)
     is_client = ctx.role == "Client"
+    is_owner = ctx.role == "Owner"
     members = [] if is_client else [
-        r for r in ctx.query(kinds=["member"])
+        r if is_owner else _visible_member(r, actor_companies)
+        for r in ctx.query(kinds=["member"])
         if (
-            ctx.role == "Owner" or "*" in actor_companies or "*" in _companies(r)
+            is_owner or "*" in actor_companies or "*" in _companies(r)
             or any(c in actor_companies for c in _companies(r))
         )
     ]
@@ -123,14 +139,25 @@ def read_state_json(services: Services, ctx: Context) -> bytes:
 def _briefing_sources_visible(ctx: Context):
     """SQL form of the briefing rule in ``accessible()``: every source must exist (and be in scope)."""
     scope = ctx.scoped_companies
-    in_scope = "" if scope is None else (
-        " AND (CASE WHEN src.kind = 'company' THEN src.id ELSE json_extract(src.data, '$.company') END) IN :briefing_scope")
-    clause = sql_text(
-        "(records.kind != 'briefing' OR (coalesce(json_type(records.data, '$.sources'), 'null') IN ('null', 'array')"
-        " AND NOT EXISTS (SELECT 1 FROM json_each(records.data, '$.sources') AS s WHERE json_type(s.value) != 'object'"
-        " OR NOT EXISTS (SELECT 1 FROM records AS src WHERE src.owner = records.owner"
-        f" AND src.id = json_extract(s.value, '$.id'){in_scope}))))"
-    )
+    if ctx.store.db.dialect == POSTGRES:
+        in_scope = "" if scope is None else (
+            " AND (CASE WHEN src.kind = 'company' THEN src.id ELSE src.data ->> 'company' END) IN :briefing_scope")
+        clause = sql_text(
+            "(records.kind != 'briefing' OR (coalesce(jsonb_typeof(records.data -> 'sources'), 'null') IN ('null', 'array')"
+            " AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(records.data -> 'sources') = 'array'"
+            " THEN records.data -> 'sources' ELSE '[]'::jsonb END) AS s(value) WHERE jsonb_typeof(s.value) != 'object'"
+            " OR NOT EXISTS (SELECT 1 FROM records AS src WHERE src.owner = records.owner"
+            f" AND src.id = s.value ->> 'id'{in_scope}))))"
+        )
+    else:
+        in_scope = "" if scope is None else (
+            " AND (CASE WHEN src.kind = 'company' THEN src.id ELSE json_extract(src.data, '$.company') END) IN :briefing_scope")
+        clause = sql_text(
+            "(records.kind != 'briefing' OR (coalesce(json_type(records.data, '$.sources'), 'null') IN ('null', 'array')"
+            " AND NOT EXISTS (SELECT 1 FROM json_each(records.data, '$.sources') AS s WHERE json_type(s.value) != 'object'"
+            " OR NOT EXISTS (SELECT 1 FROM records AS src WHERE src.owner = records.owner"
+            f" AND src.id = json_extract(s.value, '$.id'){in_scope}))))"
+        )
     if scope is not None:
         clause = clause.bindparams(bindparam("briefing_scope", value=scope, expanding=True))
     return clause
@@ -162,7 +189,12 @@ def list_records(services: Services, ctx: Context, query: RecordQuery) -> dict:
         order_by = ORDER if query.order == "desc" else (Record.updated.asc(), *ORDER[1:])
     else:
         column = field(query.sort)
-        order_by = (column.desc() if query.order == "desc" else column.asc(), *ORDER)
+        if ctx.store.db.dialect == POSTGRES:
+            # SQLite's text order is bytewise with NULLs lowest; PostgreSQL is told the same.
+            column = column.collate("C")
+            order_by = (column.desc().nulls_last() if query.order == "desc" else column.asc().nulls_first(), *ORDER)
+        else:
+            order_by = (column.desc() if query.order == "desc" else column.asc(), *ORDER)
     rows = ctx.query(order_by=order_by, limit=query.limit, offset=query.offset, **criteria)
     prefetch_briefing_sources(ctx, rows)
     items = [client_safe(ctx, {k: v for k, v in r.items() if k != "key"}) for r in rows if accessible(ctx, r)]
@@ -179,28 +211,48 @@ def audit_page(services: Services, ctx: Context, page: Page) -> dict:
 
 
 def initialise(services: Services, ctx: Context, body: dict) -> dict:
-    """Seeds the local demo team profiles the frontend expects on first launch (existing behaviour)."""
+    """Seeds the local demo team profiles the frontend expects on first launch (existing behaviour).
+
+    Local preview only: a real (password) organization never receives invented team members.
+    """
     authorize(ctx, ["Owner"])
+    if not services.settings.local_preview:
+        return {"ok": True}
     existing = ctx.find_many(m["id"] for m in DEMO_PROFILES)
     missing = [m for m in DEMO_PROFILES if m["id"] not in existing]
     if missing:
+        # Company access can only reference companies that exist in this organization.
+        known = ctx.find_many((c for m in missing for c in m["companies"] if c != "*"), "company")
         with services.db.write() as session:
             repo = RecordRepository(session, ctx.owner)
+            identity = IdentityRepository(session)
             for member in missing:
                 repo.insert(member["id"], "member", {**member, "active": True, "preview": True})
-            AuditRepository(session, ctx.owner).add(audit_label(ctx, "Enabled phase 2 and 3"), "Local role profiles and advanced workflows")
+                if identity.membership_by_member(ctx.owner, member["id"]) is None:
+                    companies = [c for c in member["companies"] if c == "*" or c in known]
+                    add_member(session, ctx.owner, member["id"], member["name"], member["role"], companies)
+            AuditRepository.of(session, ctx).add(audit_label(ctx, "Enabled phase 2 and 3"), "Local role profiles and advanced workflows")
     return {"ok": True}
 
 
 def _active_member_with_access(ctx: Context, member_id, target: dict) -> bool:
+    """Whether ``member_id`` can be the assignee of ``target`` (its ``kind`` and ``company``).
+
+    A Client can never be the responsible person for internal work (task/meeting/close/event/...):
+    ``accessible()`` hides every one of those kinds from a Client, so assigning one to a Client
+    would leave the "responsible person" unable to even see the record. A ``request`` is the one
+    kind where the assignee is routinely the Client who must respond, so it is exempt.
+    """
     member = ctx.find(member_id, "member")
-    return member is not None and member.get("active") is not False and can_access(member, target)
+    if member is None or member.get("active") is False or not can_access(member, target):
+        return False
+    return target.get("kind") == "request" or member.get("role") != "Client"
 
 
 def validate_links(ctx: Context, data: dict) -> None:
     """Linked records are fetched by primary key (batched), never by scanning the workspace."""
     company = data.get("company")
-    if data.get("assignee") and not _active_member_with_access(ctx, data["assignee"], {"company": company}):
+    if data.get("assignee") and not _active_member_with_access(ctx, data["assignee"], {"kind": data.get("kind"), "company": company}):
         raise BadRequest("Choose an active assignee with access to this company.")
     evidence = as_list(data.get("evidence"))
     documents = ctx.find_many(evidence, "document")
@@ -260,11 +312,14 @@ def create(services: Services, ctx: Context, body: dict) -> dict:
                     "notes": "Event checklist; confirm jurisdiction-specific requirements.", "preparer": ctx.actor["id"],
                     "evidence": [], "dependencies": [f"{record_id}-{index - 1}"] if index else [],
                 })
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, f"Created {kind}"), data.get("title") or data.get("name"))
+        AuditRepository.of(session, ctx).add(audit_label(ctx, f"Created {kind}"), data.get("title") or data.get("name"))
     return {"ok": True, "id": record_id}
 
 
 def member(services: Services, ctx: Context, body: dict) -> dict:
+    """Owner: a new team profile. In password mode, also creates its sign-in with the password
+    the Owner sets and shares out of band; it is the member's real password from the first sign-in
+    onward, and they can change it any time from their own account settings."""
     authorize(ctx, ["Owner"])
     name, role = text(body.get("name")), text(body.get("role"))
     if not name or role not in ("Secretary", "Accountant", "Director", "Client", "Auditor"):
@@ -276,12 +331,17 @@ def member(services: Services, ctx: Context, body: dict) -> dict:
         raise BadRequest("Assign at least one company.")
     if role == "Client" and "*" in companies:
         raise BadRequest("Assign specific companies to a client.")
+    email, password = prepare_new_credentials(services, body.get("email"), body.get("password"), body.get("confirmPassword"), name)
     member_id = str(uuid.uuid4())
     with services.db.write() as session:
         RecordRepository(session, ctx.owner).insert(member_id, "member", {
             "name": name, "role": role, "companies": companies, "active": True, "preview": services.settings.local_preview,
         })
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Created local access profile"), name)
+        # The membership (role + company scope) is what authorization reads.
+        membership = add_member(session, ctx.owner, member_id, name, role, companies)
+        if email:
+            apply_new_credentials(session, services, ctx, membership, email, password)
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Created local access profile"), name)
     return {"ok": True, "id": member_id}
 
 

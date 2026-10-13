@@ -36,3 +36,7 @@ class Conflict(ApiError):
 
 class PayloadTooLarge(ApiError):
     status_code = 413
+
+
+class TooManyRequests(ApiError):
+    status_code = 429

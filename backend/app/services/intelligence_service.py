@@ -13,6 +13,7 @@ from app.core.errors import BadRequest
 from app.core.jsvalues import js_string, le, lt, now_iso, text, today, truthy
 from app.domain.workflow_rules import csv_cell
 from app.permissions import Context, accessible, authorize
+from app.repositories.identity import IdentityRepository
 from app.repositories.records import AuditRepository, RecordRepository, field
 from app.services.context import audit_label, save, visibility_filters
 
@@ -51,6 +52,30 @@ def run_automation(services: Services, owner: str) -> dict:
                     "delivery": "In-app", "created": now_iso(),
                 })
     return {"ok": True, "count": len(due)}
+
+
+REMINDER_LEASE = "reminders"
+
+
+def run_scheduled_reminders(services: Services, holder: str, lease_seconds: int) -> dict[str, int] | None:
+    """One scheduled reminder pass over every active organization.
+
+    Returns None when another process holds the lease (it runs the pass instead). Each
+    organization is processed with queries scoped to its own records; a failure in one
+    organization is logged and does not stop the others. Inactive organizations are skipped.
+    """
+    with services.db.write() as session:
+        if not IdentityRepository(session).acquire_lease(REMINDER_LEASE, holder, lease_seconds):
+            return None
+    with services.db.read() as session:
+        organizations = IdentityRepository(session).active_organization_ids()
+    results: dict[str, int] = {}
+    for organization_id in organizations:
+        try:
+            results[organization_id] = run_automation(services, organization_id)["count"]
+        except Exception:  # noqa: BLE001 - isolate organizations from each other's failures
+            log.exception("Reminder check failed for one organization", extra={"event": "reminder_error"})
+    return results
 
 
 def automation(services: Services, ctx: Context, body: dict) -> dict:
@@ -144,7 +169,7 @@ def briefing(services: Services, ctx: Context, body: dict) -> dict:
             "sources": [{"id": r["id"], "revision": r["revision"], "title": r.get("title")} for r in source],
             "preparer": ctx.actor["id"],
         })
-        AuditRepository(session, ctx.owner).add(audit_label(ctx, "Generated briefing"), mode)
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Generated briefing"), mode)
     return {"ok": True, "id": briefing_id}
 
 

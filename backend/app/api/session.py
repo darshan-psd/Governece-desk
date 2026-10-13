@@ -22,5 +22,5 @@ async def switch(request: Request):
     payload = SessionRequest.model_validate(await json_body(request))
     token = await run_in_threadpool(switch_profile, services_of(request), request, payload.actor)
     response = json_response({"ok": True})
-    set_session_cookie(response, token, services_of(request).settings.secure_cookies)
+    set_session_cookie(response, services_of(request).settings, token)
     return response
