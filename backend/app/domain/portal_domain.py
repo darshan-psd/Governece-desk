@@ -33,7 +33,10 @@ ANNUAL_ITEMS = [
 PROFILE_FIELDS = [
     "name", "tradingName", "entityType", "registration", "incorporationDate", "email", "phone", "website", "address",
     "city", "state", "pincode", "businessActivity", "pan", "tan", "gstin", "yearEnd", "contact", "contactRole", "billingAddress",
+    "framework",
 ]
+# Identifiers that name one legal entity and so must be unique within an organization.
+UNIQUE_IDENTIFIER_FIELDS = (("registration", "CIN / registration number"), ("pan", "PAN"), ("gstin", "GSTIN"))
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+\Z", re.ASCII)
 
 
@@ -104,6 +107,34 @@ def company_profile(data: Any, submit: bool = False) -> dict:
         if not truthy(data.get("confirmed")):
             raise BadRequest("Confirm that the supplied information is accurate.")
     return out
+
+
+def _normalised_identifier(value: Any) -> str:
+    return re.sub(r"\s+", "", js_string(value)).upper()
+
+
+def _normalised_name(value: Any) -> str:
+    return re.sub(r"\s+", " ", js_string(value).strip()).lower()
+
+
+def check_company_duplicates(existing: list[dict], profile: dict, exclude_id: str | None = None) -> str | None:
+    """Enforced against every other company of the same organization, normalised for comparison
+    (case/whitespace only; storage keeps what the user typed).
+
+    A CIN, PAN or GSTIN identifies one legal entity, so a match against another company is a hard
+    error — never blocked by a company's name, where two real, unrelated companies can coincide.
+    A name match is not blocked (false positives are more likely and far less consequential): it
+    returns a warning string for the caller to surface, so the save still succeeds.
+    """
+    others = [c for c in existing if c.get("id") != exclude_id]
+    for field, label in UNIQUE_IDENTIFIER_FIELDS:
+        value = _normalised_identifier(profile.get(field))
+        if value and any(_normalised_identifier(c.get(field)) == value for c in others):
+            raise BadRequest(f"This {label} is already used by another company in your organization.")
+    name = _normalised_name(profile.get("name"))
+    if name and any(_normalised_name(c.get("name")) == name for c in others):
+        return f"A company named “{text(profile.get('name'))}” already exists in your organization. Check this isn't a duplicate before continuing."
+    return None
 
 
 def invoice_data(data: Any) -> dict:

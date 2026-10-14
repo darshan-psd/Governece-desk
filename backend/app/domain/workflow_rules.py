@@ -9,6 +9,7 @@ from typing import Any
 
 from app.core.errors import BadRequest
 from app.core.jsvalues import as_list, date_valid, is_integer, js_number, js_string, prop, text, truthy
+from app.domain.portal_domain import company_profile
 
 ROLES = ("Owner", "Secretary", "Accountant", "Director", "Client", "Auditor")
 REVIEW_ROLES = ["Owner", "Secretary", "Director"]
@@ -74,9 +75,10 @@ def validate_record(kind: Any, data: Any) -> dict:
         "notes": text(data.get("notes"), 12000),
     }
     if kind == "company":
-        if not text(data.get("name")):
-            raise BadRequest("Company name is required.")
-        return {key: text(data.get(key)) for key in ("name", "jurisdiction", "registration", "yearEnd", "contact", "framework")}
+        # Same validation as the Client Portal's company profile (one rule set per field,
+        # regardless of which screen edits it); "submit" completeness checks don't apply here —
+        # that's the portal's own review lifecycle, not this internal master-data edit.
+        return company_profile(data)
     if not common["title"]:
         raise BadRequest("Title is required.")
     if not common["company"]:

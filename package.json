@@ -7,6 +7,7 @@
   },
   "scripts": {
     "install:ci": "node scripts/install-ci.mjs",
+    "dev": "vite",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern legacy --ignore-pattern backend --ignore-pattern .sites-runtime",
     "db:generate": "drizzle-kit generate",
     "frontend:build": "node scripts/build-frontend.mjs",

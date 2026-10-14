@@ -10,7 +10,7 @@ import uuid
 from app.core.container import Services
 from app.core.errors import BadRequest, Conflict, Forbidden
 from app.core.jsvalues import as_list, js_number, now_iso, text, truthy
-from app.domain.portal_domain import ACT_SOURCE, ANNUAL_ITEMS, DOCUMENT_CATEGORIES, company_profile
+from app.domain.portal_domain import ACT_SOURCE, ANNUAL_ITEMS, DOCUMENT_CATEGORIES, check_company_duplicates, company_profile
 from app.domain.workflow_rules import require_date
 from app.permissions import Context
 from app.repositories.records import AuditRepository, RecordRepository
@@ -39,6 +39,7 @@ def company_create(services: Services, ctx: Context, body: dict) -> dict:
         client_email, client_password = prepare_new_credentials(
             services, body.get("clientEmail"), body.get("clientPassword"), body.get("clientConfirmPassword"), client_name)
     profile = company_profile(body.get("data"))
+    warning = check_company_duplicates(ctx.query(kinds=["company"]), profile)
     company_id = str(uuid.uuid4())
     company = {**profile, "profileStatus": "Draft", "portalCreatedBy": ctx.actor["id"], "created": now_iso()}
     with services.db.write() as session:
@@ -62,15 +63,17 @@ def company_create(services: Services, ctx: Context, body: dict) -> dict:
             if client_email:
                 apply_new_credentials(session, services, ctx, membership, client_email, client_password)
         AuditRepository.of(session, ctx).add(audit_label(ctx, "Started client onboarding"), company["name"])
-    return {"ok": True, "id": company_id}
+    return {"ok": True, "id": company_id, **({"warning": warning} if warning else {})}
 
 
 def company_save(services: Services, ctx: Context, body: dict, submit: bool) -> dict:
     c = record(ctx, body, "company")
     data = company_profile(body.get("data"), submit)
-    return portal_save(services, ctx, c, {
+    warning = check_company_duplicates(ctx.query(kinds=["company"]), data, exclude_id=c["id"])
+    result = portal_save(services, ctx, c, {
         **c, **data, "profileStatus": "Submitted" if submit else "Draft", "profileReviewedBy": None, "profileNote": "", "submittedBy": ctx.actor["id"],
     }, "Submitted company profile" if submit else "Updated company profile")
+    return {**result, "warning": warning} if warning else result
 
 
 def company_review(services: Services, ctx: Context, body: dict) -> dict:

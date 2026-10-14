@@ -16,6 +16,7 @@ from app.core.container import Services
 from app.core.errors import BadRequest, Forbidden
 from app.database.dialect import POSTGRES
 from app.core.jsvalues import as_list, now_iso, prop, text, today, truthy
+from app.domain.portal_domain import check_company_duplicates
 from app.domain.workflow_rules import (
     EDIT_ROLES, EVENT_TEMPLATES, REVIEW_ROLES, can_access, review_problems, validate_record,
 )
@@ -287,7 +288,10 @@ def create(services: Services, ctx: Context, body: dict) -> dict:
     if kind == "rule":
         authorize(ctx, ["Owner", "Secretary"])
     data = validate_record(kind, body.get("data") if truthy(body.get("data")) else {})
-    if kind != "company":
+    warning = None
+    if kind == "company":
+        warning = check_company_duplicates(ctx.query(kinds=["company"]), data)
+    else:
         company = ctx.find(data.get("company"), "company")
         if company is None or not can_access(ctx.actor, company):
             raise Forbidden("Company access is required.")
@@ -313,7 +317,7 @@ def create(services: Services, ctx: Context, body: dict) -> dict:
                     "evidence": [], "dependencies": [f"{record_id}-{index - 1}"] if index else [],
                 })
         AuditRepository.of(session, ctx).add(audit_label(ctx, f"Created {kind}"), data.get("title") or data.get("name"))
-    return {"ok": True, "id": record_id}
+    return {"ok": True, "id": record_id, **({"warning": warning} if warning else {})}
 
 
 def member(services: Services, ctx: Context, body: dict) -> dict:
@@ -374,6 +378,7 @@ def edit(services: Services, ctx: Context, body: dict, r: dict) -> dict:
     changes = body.get("data") if isinstance(body.get("data"), dict) else {}
     data = validate_record(r["kind"], {**r, **changes})
     validate_links(ctx, {**data, "kind": r["kind"]})
+    warning = check_company_duplicates(ctx.query(kinds=["company"]), data, exclude_id=r["id"]) if r["kind"] == "company" else None
     if r["kind"] == "request":
         data["response"] = r.get("response")
         data["evidence"] = r.get("evidence")
@@ -403,7 +408,8 @@ def edit(services: Services, ctx: Context, body: dict, r: dict) -> dict:
     rule_version = r.get("ruleVersion") or data.get("ruleVersion")
     if rule_version is not None:
         updated["ruleVersion"] = rule_version
-    return save(services, ctx, r, updated, "Updated preparation")
+    result = save(services, ctx, r, updated, "Updated preparation")
+    return {**result, "warning": warning} if warning else result
 
 
 def review_subset(ctx: Context, record: dict) -> list[dict]:
