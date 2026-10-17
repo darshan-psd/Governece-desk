@@ -36,11 +36,16 @@ BATCH = 500
 _FIELD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
-# Business uniqueness enforced by the database (migration 0004): index name → conflict message.
+# Business uniqueness enforced by the database (migrations 0004 and 0006): index name → conflict
+# message. The company identifier messages mirror ``check_company_duplicates()``, which rejects the
+# same collision with a 400 before the write; the index is what two racing requests hit.
 UNIQUE_RULES = {
     "ux_records_invoice_number": "Invoice number already issued or record changed.",
     "ux_records_payment_reference": "This transaction reference has already been reported.",
     "ux_records_trialbalance_file": "This file has already been imported for this company, period and currency.",
+    "ux_records_company_registration": "This CIN / registration number is already used by another company in your organization.",
+    "ux_records_company_pan": "This PAN is already used by another company in your organization.",
+    "ux_records_company_gstin": "This GSTIN is already used by another company in your organization.",
 }
 
 

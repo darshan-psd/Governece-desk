@@ -1,4 +1,4 @@
-"""Database-level business rules (migration 0004) and safe text storage, on SQLite and PostgreSQL.
+"""Database-level business rules (migrations 0004 and 0006) and safe text storage, on SQLite and PostgreSQL.
 
 These guarantees back up the application checks when requests race; here they are exercised
 directly at the repository level (as code that skipped the application check would hit them).
@@ -6,6 +6,7 @@ Run on PostgreSQL with GOVERNANCE_TEST_DATABASE=postgres.
 """
 from __future__ import annotations
 
+import re
 from datetime import date
 
 import pytest
@@ -70,6 +71,20 @@ def test_a_trial_balance_file_is_imported_once_in_the_database(api, client):
             RecordRepository(session, WS).insert("tb-copy", "trialbalance", copy)
     with services_of(client).db.write() as session:  # another period is a different import
         RecordRepository(session, WS).insert("tb-other-period", "trialbalance", {**copy, "period": "2026-08"})
+
+
+def test_company_identifiers_are_unique_per_organization_in_the_database(api, client):
+    """The backstop for two company creations that race past the application check (migration 0006)."""
+    services = services_of(client)
+    api.create("company", {"name": "Statutory Co", "registration": "U72900TN2026PTC123456", "pan": "ABCDE1234F",
+                           "gstin": "33ABCDE1234F1Z5"})
+    for field, value, message in (("registration", " u72900tn2026ptc123456 ", "CIN / registration number"),
+                                  ("pan", "abcde1234f", "PAN"), ("gstin", "33abcde1234f1z5", "GSTIN")):
+        with pytest.raises(Conflict, match=f"This {re.escape(message)} is already used"):
+            with services.db.write() as session:
+                RecordRepository(session, WS).insert(f"company-copy-{field}", "company", {"name": "Racing Co", field: value})
+    with services.db.write() as session:  # a company without identifiers is unaffected
+        RecordRepository(session, WS).insert("company-proposed", "company", {"name": "Racing Co", "registration": "", "pan": ""})
 
 
 def test_an_email_belongs_to_one_account(api, client):
