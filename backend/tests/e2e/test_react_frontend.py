@@ -25,7 +25,7 @@ BACKEND = Path(__file__).resolve().parents[2]
 SIDEBAR = ["Overview", "My work", "Companies", "Calendar", "Review queue", "Board room", "Corporate events", "Client portal",
            "Client requests", "Documents", "Accounting", "Rule library", "Submissions", "Reports", "Briefings", "Inbox",
            "Team & access", "Connections", "Audit trail"]
-PORTAL_TABS = ["Overview", "Company profile", "Onboarding", "Documents", "Inbox", "Compliance calendar", "Invoices & payments"]
+PORTAL_TABS = ["Overview", "Company profile", "Onboarding", "Documents", "Inbox", "Requests", "Compliance calendar", "Invoices & payments"]
 
 
 def _free_port() -> int:
@@ -312,3 +312,84 @@ def test_module_forms_edits_and_actions(page):
     # Optional providers: the API reports AI as not configured, so the UI disables AI drafting.
     nav(page, "Briefings")
     expect(page.get_by_role("button", name="Generate AI draft")).to_be_disabled()
+
+
+def test_client_answers_a_request_in_the_portal_and_staff_review_it(page):
+    """Request → upload → review → correction → resubmission → close, through both real UIs."""
+    title = "Q3 bank statements"
+    row = lambda: page.locator("main").get_by_role("button", name=re.compile(re.escape(title))).first  # noqa: E731
+
+    # The employee onboards a client and sends them a request from the internal Client requests module.
+    nav(page, "Client portal")
+    page.get_by_role("button", name="Onboard a client").first.click()
+    page.get_by_label("Company / proposed company name *").fill("Requests Co Pvt Ltd")
+    page.get_by_label("New client contact name (creates a local client profile) *").fill("Ravi Client")
+    page.get_by_role("button", name="Save draft").click()
+    toast(page, "Saved successfully")
+    page.get_by_role("button", name="← Back to internal workspace").click()
+    create_via_form(page, "Client requests", "New information request", {
+        "Title *": title, "Company *": "Requests Co Pvt Ltd", "Due date *": "2026-12-15",
+        "Client recipient *": "Ravi Client", "Requested information": "Upload the July–September statements."},
+        "Create information request")
+
+    # The client finds it under Requests (directly below Inbox), uploads the document and submits it.
+    preview_as(page, "Ravi Client · Client")
+    labels = page.locator("aside nav button").all_inner_texts()
+    assert labels.index("Requests") == labels.index("Inbox") + 1, labels
+    page.get_by_role("button", name="Requests", exact=True).first.click()
+    expect(row()).to_contain_text("Awaiting Your Action")
+    expect(row()).to_contain_text("Upload the July–September statements.")
+    row().click()
+    page.get_by_label("Document for this request").set_input_files({"name": "statements-q3.txt", "mimeType": "text/plain", "buffer": b"Q3"})
+    page.get_by_role("button", name="Upload to this request").click()
+    toast(page, "Document uploaded to this request")
+    expect(page.get_by_role("dialog").get_by_role("link", name="statements-q3.txt")).to_be_visible()
+    page.get_by_role("button", name="Submit for review").click()
+    toast(page, "Submitted to your secretary for review")
+    expect(page.get_by_role("dialog")).to_contain_text("Submitted. Your secretary is reviewing it")
+    page.get_by_role("button", name="Close portal dialog").click()
+    page.get_by_role("button", name="Work Tracker", exact=True).first.click()
+    expect(row()).to_contain_text("Under Review")
+    no_error(page, "client submits request")
+
+    # The employee reviews the upload and asks for a correction.
+    preview_as(page, "Workspace owner")
+    nav(page, "Client requests")
+    page.locator("main").get_by_text(title).filter(visible=True).first.click()
+    expect(page.get_by_role("link", name=re.compile("statements-q3.txt"))).to_be_visible()
+    page.get_by_label("Review note / correction requested").fill("September is missing.")
+    page.get_by_role("button", name="Request correction").click()
+    expect(page.locator(".drawer-meta")).to_contain_text("Returned")
+    close_details(page)
+    no_error(page, "staff returns request")
+
+    # The client reads the correction and resubmits a corrected document.
+    preview_as(page, "Ravi Client · Client")
+    page.get_by_role("button", name="Requests", exact=True).first.click()
+    page.get_by_role("button", name=re.compile("^Changes Requested")).click()
+    expect(row()).to_contain_text("To correct: September is missing.")
+    row().click()
+    page.get_by_label("Document for this request").set_input_files({"name": "statements-q3-v2.txt", "mimeType": "text/plain", "buffer": b"Q3 + Sep"})
+    page.get_by_role("button", name="Upload to this request").click()
+    toast(page, "Document uploaded to this request")
+    page.get_by_label(re.compile("^Message to your secretary")).fill("Added September.")
+    page.get_by_role("button", name="Resubmit for review").click()
+    toast(page, "Submitted to your secretary for review")
+    page.get_by_role("button", name="Close portal dialog").click()
+    no_error(page, "client resubmits request")
+
+    # The employee sees both uploads and closes the request; both pages show it completed.
+    preview_as(page, "Workspace owner")
+    nav(page, "Client requests")
+    page.locator("main").get_by_text(title).filter(visible=True).first.click()
+    expect(page.get_by_role("link", name=re.compile("statements-q3-v2.txt"))).to_be_visible()
+    page.get_by_role("button", name="Accept and close").click()
+    expect(page.locator(".drawer-meta")).to_contain_text("Closed")
+    close_details(page)
+    preview_as(page, "Ravi Client · Client")
+    page.get_by_role("button", name="Requests", exact=True).first.click()
+    page.get_by_role("button", name=re.compile("^Completed")).click()
+    expect(row()).to_contain_text("Completed")
+    page.get_by_role("button", name="Work Tracker", exact=True).first.click()
+    expect(row()).to_contain_text("Completed")
+    no_error(page, "request closed")

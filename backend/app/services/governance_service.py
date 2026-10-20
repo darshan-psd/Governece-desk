@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from app.core.container import Services
 from app.core.errors import BadRequest, Forbidden, NotFound
 from app.core.jsvalues import as_list, now_iso, prop, text, today, truthy
-from app.domain.workflow_rules import EDIT_ROLES, escape_html, next_date, validate_record
+from app.domain.workflow_rules import CANCELLED, EDIT_ROLES, escape_html, next_date, validate_record
 from app.permissions import Context, accessible, authorize
 from app.repositories.records import AuditRepository, RecordRepository
 from app.services.context import audit_label, save
@@ -24,6 +24,8 @@ def meeting_action(services: Services, ctx: Context, body: dict, r: dict) -> dic
     authorize(ctx, EDIT_ROLES)
     if r.get("kind") != "meeting":
         raise BadRequest("Select a meeting.")
+    if r.get("status") == CANCELLED:
+        raise BadRequest("This meeting was cancelled.")
     changes = body.get("data") if isinstance(body.get("data"), dict) else {}
     data = validate_record("task", {**changes, "company": r.get("company")})
     validate_links(ctx, {**data, "kind": "task"})
@@ -104,8 +106,9 @@ def respond(services: Services, ctx: Context, body: dict, r: dict) -> dict:
     if ctx.role == "Auditor":
         raise Forbidden("Auditors cannot submit responses.")
     response = text(body.get("response"), 10000)
-    if not response:
-        raise BadRequest("Provide a response.")
+    # A document uploaded to the request (``documents_service.upload_document``) answers it too.
+    if not response and not as_list(r.get("evidence")):
+        raise BadRequest("Provide a response or upload the requested document.")
     return save(services, ctx, r, {**r, "response": response, "status": "Responded", "respondedBy": ctx.actor["id"], "respondedAt": now_iso()}, "Submitted response")
 
 

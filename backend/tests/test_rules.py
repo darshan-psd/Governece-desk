@@ -5,7 +5,7 @@ from app.core.errors import BadRequest
 from app.core.jsvalues import date_valid, js_number, js_string, text, truthy
 from app.domain.accounting import parse_trial_balance
 from app.domain.portal_domain import check_company_duplicates, company_profile, invoice_data, money
-from app.domain.workflow_rules import can_access, csv_cell, escape_html, next_date, review_problems, validate_record
+from app.domain.workflow_rules import can_access, clean_checklist, csv_cell, escape_html, next_date, review_problems, validate_record
 from app.services.portal.exports import money_text
 
 
@@ -27,6 +27,31 @@ def test_rule_validation_and_access():
         validate_record("company", {"name": " "})
     assert can_access({"role": "Client", "companies": ["a"]}, {"kind": "company", "id": "b"}) is False
     assert can_access({"role": "Client", "companies": ["a"]}, {"kind": "task", "company": "a"}) is True
+
+
+def test_checklist_steps_need_a_label():
+    """A step with no text is a half-finished edit: it used to be dropped silently, which lost a
+    preparation checklist behind a "Saved successfully" message."""
+    kept = clean_checklist([{"id": "a", "label": "Reconcile bank", "done": True},
+                            {"id": "b", "label": " Review journals ", "done": False}])
+    assert kept == [{"id": "a", "label": "Reconcile bank", "done": True},
+                    {"id": "b", "label": "Review journals", "done": False}]  # ids and state kept
+    assert clean_checklist([]) == [] and clean_checklist(None) == []
+    for broken in ([{"label": ""}], [{"label": "   "}], [{"label": "\t\n"}], [{"done": True}], [{}]):
+        with pytest.raises(BadRequest, match="Give every checklist step a label."):
+            clean_checklist(broken)
+    with pytest.raises(BadRequest, match="Give every checklist step a label."):  # one bad step in a valid list
+        clean_checklist([{"label": "Reconcile bank", "done": True}, {"label": "", "done": True},
+                         {"label": "Review journals"}])
+    # A step added without a label is refused for both kinds that carry a checklist.
+    for kind in ("task", "close"):
+        base = {"title": "Preparation", "company": "c", "due": "2026-10-01",
+                "checklist": [{"label": "Reconcile bank", "done": True}, {"label": "", "done": True}]}
+        with pytest.raises(BadRequest, match="Give every checklist step a label."):
+            validate_record(kind, base)
+        assert len(validate_record(kind, {**base, "checklist": base["checklist"][:1]})["checklist"]) == 1
+    # Steps without an id are still given one.
+    assert clean_checklist([{"label": "Reconcile bank"}])[0]["id"]
 
 
 def test_meeting_quorum_validation():

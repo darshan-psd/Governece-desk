@@ -156,6 +156,16 @@ async def member_status(request: Request):
     return json_response(await run_in_threadpool(run), no_store=True)
 
 
+@router.post("/api/auth/team/role")
+async def member_role(request: Request):
+    body = await json_body(request)
+
+    def run():
+        services, _principal, ctx = _signed_in(request)
+        return auth_service.set_member_role(services, ctx, body.get("member"), body.get("role"), _client(request))
+    return json_response(await run_in_threadpool(run), no_store=True)
+
+
 @router.post("/api/auth/team/companies")
 async def member_companies(request: Request):
     body = await json_body(request)

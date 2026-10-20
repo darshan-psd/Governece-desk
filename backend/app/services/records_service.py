@@ -18,10 +18,10 @@ from app.database.dialect import POSTGRES
 from app.core.jsvalues import as_list, now_iso, prop, text, today, truthy
 from app.domain.portal_domain import check_company_duplicates
 from app.domain.workflow_rules import (
-    EDIT_ROLES, EVENT_TEMPLATES, REVIEW_ROLES, can_access, review_problems, validate_record,
+    CANCELLED, EDIT_ROLES, EVENT_TEMPLATES, REVIEW_ROLES, can_access, review_problems, validate_record,
 )
 from app.permissions import Context, accessible, authorize, client_safe, prefetch_briefing_sources
-from app.models import Record
+from app.models import ASSIGNABLE_ROLES, Record
 from app.repositories.identity import IdentityRepository
 from app.repositories.records import ORDER, AuditRepository, RecordRepository, field
 from app.schemas import Page, RecordQuery
@@ -36,13 +36,20 @@ DEMO_PROFILES = [
     {"id": "client", "name": "Northstar client", "role": "Client", "companies": ["c1"]},
     {"id": "auditor", "name": "External auditor", "role": "Auditor", "companies": ["*"]},
 ]
+# ``Cancelled`` ends the lifecycle of work that will not be carried out. It is offered from every
+# status up to and including review, but not from ``Approved`` or ``Completed``: approved work
+# carries an independent approval and completed work is finished, so either must first be returned
+# to preparation (an existing, audited transition) before it can be cancelled. Nothing leads out of
+# ``Cancelled`` — like a voided invoice, a cancelled record stays as history and the work is
+# re-created as a new record if it turns out to be needed after all.
 TRANSITIONS = {
-    "Not started": ["In progress"],
-    "In progress": ["Awaiting information", "Under review"],
-    "Awaiting information": ["In progress"],
-    "Under review": ["In progress", "Approved"],
+    "Not started": ["In progress", CANCELLED],
+    "In progress": ["Awaiting information", "Under review", CANCELLED],
+    "Awaiting information": ["In progress", CANCELLED],
+    "Under review": ["In progress", "Approved", CANCELLED],
     "Approved": ["Completed", "In progress"],
     "Completed": ["In progress"],
+    CANCELLED: [],
 }
 
 
@@ -79,7 +86,7 @@ def _state_meta(services: Services, ctx: Context) -> dict:
     is_client = ctx.role == "Client"
     is_owner = ctx.role == "Owner"
     members = [] if is_client else [
-        r if is_owner else _visible_member(r, actor_companies)
+        {**(r if is_owner else _visible_member(r, actor_companies)), "client": r.get("role") == "Client"}
         for r in ctx.query(kinds=["member"])
         if (
             is_owner or "*" in actor_companies or "*" in _companies(r)
@@ -278,6 +285,19 @@ def validate_links(ctx: Context, data: dict) -> None:
         task = ctx.find(data.get("task"), "task")
         if task is None or task.get("company") != company:
             raise BadRequest("Link a task from this company.")
+    if data.get("kind") == "request":
+        # An information request is answered in the client portal, where a client sees only the
+        # requests addressed to them (``accessible()``). Addressing one to a colleague therefore
+        # means the client never receives it, which is silently useless; so when the company has a
+        # client who could answer, the request must go to one of them. A company with no client
+        # profile yet can still have requests recorded against it.
+        recipient = ctx.find(data.get("assignee"), "member") or {}
+        if recipient.get("role") != "Client" and any(
+            m.get("role") == "Client" and m.get("active") is not False
+            and can_access(m, {"kind": "request", "company": company})
+            for m in ctx.query(kinds=["member"])
+        ):
+            raise BadRequest("Assign this request to the client who must answer it in the portal.")
     if data.get("kind") == "rule" and ctx.role not in ("Owner", "Secretary"):
         raise Forbidden("Only owners and secretaries may prepare rules.")
 
@@ -326,7 +346,7 @@ def member(services: Services, ctx: Context, body: dict) -> dict:
     onward, and they can change it any time from their own account settings."""
     authorize(ctx, ["Owner"])
     name, role = text(body.get("name")), text(body.get("role"))
-    if not name or role not in ("Secretary", "Accountant", "Director", "Client", "Auditor"):
+    if not name or role not in ASSIGNABLE_ROLES:
         raise BadRequest("Enter a name and valid role.")
     requested = as_list(body.get("companies"))
     known = ctx.find_many((c for c in requested if c != "*"), "company")
@@ -373,6 +393,8 @@ def edit(services: Services, ctx: Context, body: dict, r: dict) -> dict:
     authorize(ctx, EDIT_ROLES)
     if r.get("kind") not in ("company", "task", "close", "meeting", "rule", "request", "event"):
         raise BadRequest("This record has a dedicated workflow.")
+    if r.get("status") == CANCELLED:
+        raise BadRequest("This record was cancelled and can no longer be edited.")
     if r.get("status") in ("Approved", "Completed", "Published"):
         raise BadRequest("Reopen or revise this record before editing.")
     changes = body.get("data") if isinstance(body.get("data"), dict) else {}
@@ -446,6 +468,9 @@ def transition(services: Services, ctx: Context, body: dict, r: dict) -> dict:
             raise BadRequest(" ".join(problems))
     else:
         authorize(ctx, EDIT_ROLES)
+    reason = text(body.get("reason"), 2000) if status == CANCELLED else ""
+    if status == CANCELLED and not reason:
+        raise BadRequest("Record the reason for cancelling this work.")
     if status == "Under review":
         if not r.get("assignee"):
             raise BadRequest("Assign the responsible person before review.")
@@ -460,8 +485,8 @@ def transition(services: Services, ctx: Context, body: dict, r: dict) -> dict:
         ):
             raise BadRequest("Record the filing acknowledgement or accepted submission first.")
         # ``event`` is only set on the checklist tasks generated for an event, in the event's company.
-        if r["kind"] == "event" and any(x.get("status") != "Completed" for x in ctx.query(kinds=["task"], where={"company": r.get("company"), "event": r["id"]})):
-            raise BadRequest("Complete every event task first.")
+        if r["kind"] == "event" and any(x.get("status") not in ("Completed", CANCELLED) for x in ctx.query(kinds=["task"], where={"company": r.get("company"), "event": r["id"]})):
+            raise BadRequest("Complete or cancel every event task first.")
     if status == "Approved":
         evidence = []
         for doc_id in as_list(r.get("evidence")):
@@ -477,7 +502,11 @@ def transition(services: Services, ctx: Context, body: dict, r: dict) -> dict:
         approval = None
     else:
         approval = r.get("approval")
-    updated = {**r, "status": status, "reviewRequired": False, "completedAt": now_iso() if status == "Completed" else None, "approval": approval}
+    # The reason is kept on the record, as ``voidReason`` is for a voided invoice; the audit entry
+    # carries the actor, the timestamp and the record (``save`` writes both in one transaction).
+    cancellation = {"cancelledBy": ctx.actor["id"], "cancelledAt": now_iso(), "cancellationReason": reason} if status == CANCELLED else {}
+    updated = {**r, "status": status, "reviewRequired": False, "completedAt": now_iso() if status == "Completed" else None,
+               "approval": approval, **cancellation}
     return save(services, ctx, r, updated, "Status: " + status)
 
 

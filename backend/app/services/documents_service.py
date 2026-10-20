@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from app.core.container import Services
 from app.core.errors import BadRequest, Conflict, Forbidden, NotFound
-from app.core.jsvalues import now_iso, truthy
+from app.core.jsvalues import as_list, now_iso, truthy
 from app.domain.accounting import parse_trial_balance
 from app.domain.portal_domain import DOCUMENT_CATEGORIES
 from app.permissions import Context, accessible, authorize
@@ -25,6 +25,9 @@ MAX_IMPORT_BYTES = 1024 * 1024
 ALLOWED_EXTENSIONS = ("pdf", "txt", "csv", "xlsx", "docx")
 CURRENCIES = ("INR", "GBP", "USD", "SGD", "EUR", "AUD")
 REVIEW_ON_NEW_VERSION = ("task", "meeting", "close", "event", "submission")
+# An information request takes documents while the client still owes an answer: the same statuses
+# in which ``governance_service.respond`` accepts one.
+ANSWERABLE_REQUEST = ("Open", "Returned")
 
 
 @dataclass
@@ -47,11 +50,29 @@ def _company_accessible(ctx: Context, company_id: str) -> bool:
     return company is not None and accessible(ctx, company)
 
 
+def _answerable_request(ctx: Context, request_id: str, company: str) -> dict:
+    """The information request an upload answers.
+
+    It must be visible to the uploader — a client only sees the requests addressed to them — so a
+    forged id, another client's request or another organization's is reported exactly like a
+    missing one. It must belong to the upload's company and still be waiting for an answer.
+    """
+    request = ctx.find(request_id, "request")
+    if request is None or not accessible(ctx, request):
+        raise NotFound("Request not found.")
+    if request.get("company") != company:
+        raise BadRequest("Upload the document to the request's own company.")
+    if request.get("status") not in ANSWERABLE_REQUEST:
+        raise BadRequest("This request is not accepting documents.")
+    return request
+
+
 def upload_document(services: Services, ctx: Context, form: dict, file: IncomingFile | None) -> dict:
     authorize(ctx, ["Owner", "Secretary", "Accountant", "Client", "Director"])
     company = _field(form, "company")
     if not _company_accessible(ctx, company):
         raise Forbidden("Company access is required.")
+    request = _answerable_request(ctx, _field(form, "request"), company) if _field(form, "request") else None
     if file is None or file.size == 0 or file.size > MAX_DOCUMENT_BYTES:
         raise BadRequest("Choose a file between 1 byte and 10 MB.")
     extension = file.name.split(".")[-1].lower()
@@ -90,6 +111,7 @@ def upload_document(services: Services, ctx: Context, form: dict, file: Incoming
         "key": key, "size": file.size, "hash": digest, "version": ((parent or {}).get("version") or 0) + 1,
         "previous": previous or None, "shared": ctx.role == "Client" or form.get("shared") == "true",
         "uploadedBy": ctx.actor["id"], "scanStatus": "Not scanned",
+        **({"request": request["id"]} if request else {}),
     }
     try:
         with services.db.write() as session:
@@ -100,6 +122,13 @@ def upload_document(services: Services, ctx: Context, form: dict, file: Incoming
                     raise Conflict("The document changed during upload. Refresh and retry.")
             repo.insert(document_id, "document", data)
             AuditRepository.of(session, ctx).add(audit_label(ctx, "Uploaded document"), file.name)
+            if request:
+                # Linked in the same transaction: the request's ``evidence`` lists what was sent in
+                # answer to it, for the reviewer. A decision taken meanwhile makes this fail (409).
+                linked = {**request, "evidence": [*as_list(request.get("evidence")), document_id]}
+                if not repo.update_if_revision(request["id"], request["revision"], linked):
+                    raise Conflict("The request changed during upload. Refresh and retry.")
+                AuditRepository.of(session, ctx).add(audit_label(ctx, "Attached document to request"), request.get("title"))
             if parent:
                 # Work approved against the old version must be reviewed again.
                 # Evidence always belongs to the record's own company (enforced when it is linked).

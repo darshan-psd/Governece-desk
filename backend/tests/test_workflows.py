@@ -191,6 +191,61 @@ def test_trial_balance_import_review_and_close(workspace):
     api.move(close, "Completed")
 
 
+def test_close_preparation_persists_and_unlabelled_steps_are_refused(workspace):
+    """Notes, checklist and evidence must survive a save and a fresh read of the record, and a
+    checklist row added without a label must be refused instead of silently dropped."""
+    api, c, c2, common = workspace
+    evidence = api.upload(c)
+    foreign = api.upload(c2)
+    imported = api.trial_balance(c)
+    api.role("accountant")
+    api.action(imported, "reviewImport")
+    api.role("owner")
+    close = api.create("close", {**common, "title": "January 2026 Financial Close", "period": "2026-09",
+                                 "trialbalance": imported})
+
+    # An unlabelled step is refused at creation and at edit, and changes nothing.
+    api.create("close", {**common, "title": "Unlabelled", "period": "2026-09", "trialbalance": imported,
+                         "checklist": [{"label": "", "done": True}]}, 400)
+    before = api.get(close)
+    prepared = {"notes": "Reconcile bank balances and review journal entries.",
+                "checklist": [{"id": "step-1", "label": "Reconcile bank", "done": True},
+                              {"id": "step-2", "label": "Review journals", "done": False}],
+                "evidence": [evidence]}
+    for broken in ([{"id": "step-1", "label": "", "done": True}],
+                   [{"id": "step-1", "label": "   ", "done": False}],
+                   [{"id": "step-1", "label": "Reconcile bank", "done": True}, {"id": "step-2", "label": "", "done": True}]):
+        response = api.request("POST", "/api/v2", json={"action": "edit", "id": close, "revision": before["revision"],
+                                                        "data": {**prepared, "checklist": broken}})
+        assert response.status_code == 400 and response.json()["error"] == "Give every checklist step a label."
+    unchanged = api.get(close)
+    assert unchanged["revision"] == before["revision"] and unchanged["checklist"] == [] and unchanged["notes"] == ""
+
+    # The valid preparation saves, and reads back identically from both read paths.
+    api.edit(close, prepared)
+    saved = api.get(close)
+    assert saved["notes"] == prepared["notes"] and saved["evidence"] == [evidence]
+    assert saved["checklist"] == prepared["checklist"]  # ids and completion states preserved
+    page = api.call("/api/v2/records?kind=close")
+    assert next(r for r in page["items"] if r["id"] == close)["checklist"] == prepared["checklist"]
+
+    # Another member of the same company reads the same record with the same preparation.
+    api.role("secretary")
+    reloaded = api.get(close)
+    assert reloaded["id"] == close and reloaded["checklist"] == prepared["checklist"]
+    assert reloaded["notes"] == prepared["notes"] and reloaded["evidence"] == [evidence]
+    api.role("owner")
+
+    # Unrelated rules still hold: evidence must belong to this company, and the review gate still
+    # requires every step to be complete.
+    api.edit(close, {"evidence": [foreign]}, 400)
+    api.move(close, "In progress")
+    api.move(close, "Under review", 400)  # "Review journals" is not done
+    api.edit(close, {"checklist": [{**prepared["checklist"][0]}, {**prepared["checklist"][1], "done": True}]})
+    api.move(close, "Under review")
+    assert [s["done"] for s in api.get(close)["checklist"]] == [True, True]
+
+
 def test_rule_publication_and_idempotent_generation(workspace):
     api, _c, _c2, common = workspace
     rule = api.create("rule", {**common, "title": "Monthly internal review", "source": "Internal board policy 2026", "frequency": "Monthly", "offset": 0})

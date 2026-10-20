@@ -25,6 +25,8 @@ from app.auth.passwords import hash_password, needs_rehash, validate_password, v
 from app.core.container import Services
 from app.core.errors import BadRequest, Conflict, Forbidden, NotFound, TooManyRequests, Unauthorized
 from app.core.jsvalues import as_list
+from app.domain.workflow_rules import SETTLED_STATUSES
+from app.models import ASSIGNABLE_ROLES
 from app.notifications.mail import DeliveryError, EmailMessage
 from app.permissions import Context, authorize
 from app.repositories.auth import AuthRepository
@@ -349,17 +351,8 @@ def set_member_status(services: Services, ctx: Context, member_id: Any, status: 
     with services.db.write() as session:
         membership = _membership_for(ctx, session, member_id)
         identity = IdentityRepository(session)
-        if membership.role == "Owner" and status == "inactive":
-            from sqlalchemy import select
-
-            from app.models import Membership
-            # Lock the active owners (fixed order: no deadlocks) so two owners deactivating each other
-            # at the same moment cannot both succeed: the second waits, then sees the first change.
-            active_owners = session.scalars(select(Membership.id).where(
-                Membership.organization_id == ctx.owner, Membership.role == "Owner", Membership.status == "active")
-                .order_by(Membership.id).with_for_update()).all()
-            if not [owner for owner in active_owners if owner != membership.id]:
-                raise BadRequest("The workspace must keep at least one active owner.")
+        if membership.role == "Owner" and status == "inactive" and not _active_owners_except(session, ctx.owner, membership.id):
+            raise BadRequest("The workspace must keep at least one active owner.")
         identity.set_membership_status(membership.id, status)
         records = RecordRepository(session, ctx.owner)
         profile = records.get(membership.member_id)
@@ -373,6 +366,77 @@ def set_member_status(services: Services, ctx: Context, member_id: Any, status: 
         name = (profile or {}).get("name") or membership.member_id
         AuditRepository.of(session, ctx).add(audit_label(ctx, "Deactivated team member" if status == "inactive" else "Reactivated team member"), name)
     return {"ok": True}
+
+
+# Work a Client can never be the responsible person for: ``accessible()`` hides these kinds from a
+# Client, so an assignment that survives a demotion is reported back to the Owner (it is not
+# changed here — reassigning someone's work is the Owner's decision, not a side effect).
+STAFF_ONLY_WORK = ("task", "meeting", "close", "event", "rule", "submission")
+
+
+def _active_owners_except(session, organization_id: str, membership_id: str) -> list[str]:
+    """Active owners of the organization other than ``membership_id``, locked in a fixed order so
+    two owners changing each other at the same moment cannot both succeed (as in set_member_status)."""
+    from sqlalchemy import select
+
+    from app.models import Membership
+    owners = session.scalars(select(Membership.id).where(
+        Membership.organization_id == organization_id, Membership.role == "Owner", Membership.status == "active")
+        .order_by(Membership.id).with_for_update()).all()
+    return [owner for owner in owners if owner != membership_id]
+
+
+def set_member_role(services: Services, ctx: Context, member_id: Any, role: Any, client: str) -> dict:
+    """Owner: change an existing team member's role, keeping their company access exactly as it is.
+
+    The role lives on the membership, which ``load_context`` resolves on every request, so the new
+    role governs the member's next request without them signing in again (their sessions stay
+    valid — this is a change of role, not a loss of access).
+
+    Client transitions: a Client may never hold organization-wide access
+    (``ck_memberships_client_scope``), so a member with ``*`` must be given specific companies
+    first, through the existing company-access action. Promoting a Client to staff keeps exactly
+    the companies they already had: no path here widens anyone's company access.
+    """
+    authorize(ctx, ["Owner"])
+    if role == "Owner":
+        raise BadRequest("An additional workspace owner cannot be appointed here.")
+    if role not in ASSIGNABLE_ROLES:
+        raise BadRequest("Choose a valid role.")
+    if member_id == ctx.actor.get("id"):
+        raise BadRequest("You cannot change your own role.")
+    with services.db.write() as session:
+        membership = _membership_for(ctx, session, member_id)
+        if membership.role == role:
+            raise BadRequest("This team member already has that role.")
+        identity = IdentityRepository(session)
+        if membership.role == "Owner" and not _active_owners_except(session, ctx.owner, membership.id):
+            raise BadRequest("The workspace must keep at least one active owner.")
+        records = RecordRepository(session, ctx.owner)
+        profile = records.get(membership.member_id)
+        profile = profile if profile is not None and profile.get("kind") == "member" else None
+        warning = None
+        if role == "Client":
+            scoped = [c for c in as_list((profile or {}).get("companies")) if c != "*"]
+            if membership.all_companies or "*" in as_list((profile or {}).get("companies")) or not scoped:
+                raise BadRequest("Assign specific companies to this team member before making them a client.")
+            # Internal work still pointing at them: reported, never reassigned automatically.
+            held = [r for r in records.find(kinds=STAFF_ONLY_WORK, where={"assignee": membership.member_id})
+                    if r.get("status") not in SETTLED_STATUSES]
+            if held:
+                warning = (f"{len(held)} internal record(s) still name this person as the responsible person; "
+                           "a client cannot see them. Reassign that work.")
+        previous = membership.role
+        identity.set_membership_role(membership.id, role)
+        if profile is not None:
+            if not records.update_if_revision(profile["id"], profile["revision"], {**profile, "role": role}):
+                raise Conflict("This team member changed. Reload and retry.")
+        AuthRepository(session).event("member_role_changed", organization_id=ctx.owner, user_id=membership.user_id,
+                                      membership_id=membership.id, client=client, by=ctx.membership_id,
+                                      previous_role=previous, role=role)
+        name = (profile or {}).get("name") or membership.member_id
+        AuditRepository.of(session, ctx).add(audit_label(ctx, f"Changed role to {role}"), name)
+    return {"ok": True, "role": role, **({"warning": warning} if warning else {})}
 
 
 def set_member_companies(services: Services, ctx: Context, member_id: Any, companies: Any, client: str) -> dict:

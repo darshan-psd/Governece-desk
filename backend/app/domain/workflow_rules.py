@@ -14,6 +14,11 @@ from app.domain.portal_domain import company_profile
 ROLES = ("Owner", "Secretary", "Accountant", "Director", "Client", "Auditor")
 REVIEW_ROLES = ["Owner", "Secretary", "Director"]
 EDIT_ROLES = ["Owner", "Secretary", "Accountant"]
+CANCELLED = "Cancelled"
+# A record in one of these statuses is no longer outstanding work: reminders, briefings and the
+# client-portal calendar leave it out. ``Closed`` belongs to client requests, ``Cancelled`` to the
+# task / meeting / close / event lifecycle; a record keeps its history either way.
+SETTLED_STATUSES = ("Completed", "Closed", CANCELLED)
 
 EVENT_TEMPLATES: dict[str, list[str]] = {
     "Director appointment": ["Obtain consent and disclosures", "Review appointment resolution", "Update officer register", "Prepare applicable filing", "Record acknowledgement"],
@@ -31,11 +36,18 @@ def require_date(value: Any, label: str = "Due date") -> str:
 
 
 def clean_checklist(value: Any) -> list[dict]:
+    """Preparation steps, each keeping its id and completion state.
+
+    A step with no label (or only whitespace) is a half-finished edit, not an empty step: it used
+    to be dropped here, so a row added in the UI and saved without text disappeared behind a
+    success message. It is now refused, and the record is left as it was.
+    """
     items = []
     for item in as_list(value)[:100]:
         entry = {"id": text(prop(item, "id")) or str(uuid.uuid4()), "label": text(prop(item, "label")), "done": truthy(prop(item, "done"))}
-        if entry["label"]:
-            items.append(entry)
+        if not entry["label"]:
+            raise BadRequest("Give every checklist step a label.")
+        items.append(entry)
     return items
 
 

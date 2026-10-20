@@ -11,7 +11,7 @@ import httpx
 from app.core.container import Services
 from app.core.errors import BadRequest
 from app.core.jsvalues import js_string, le, lt, now_iso, text, today, truthy
-from app.domain.workflow_rules import csv_cell
+from app.domain.workflow_rules import SETTLED_STATUSES, csv_cell
 from app.permissions import Context, accessible, authorize
 from app.repositories.identity import IdentityRepository
 from app.repositories.records import AuditRepository, RecordRepository, field
@@ -37,7 +37,7 @@ def run_automation(services: Services, owner: str) -> dict:
         repo = RecordRepository(session, owner)
         # SQLite narrows to work items due within three days; the exact rule is re-applied below.
         candidates = repo.find(kinds=OPEN_KINDS, extra=[field("due") <= limit])
-        open_items = [r for r in candidates if r.get("status") not in ("Completed", "Closed") and le(r.get("due"), limit)]
+        open_items = [r for r in candidates if r.get("status") not in SETTLED_STATUSES and le(r.get("due"), limit)]
         notified = repo.get_many(f"notice-{r.get('id')}-{day}" for r in open_items)
     due = [r for r in open_items if f"notice-{r.get('id')}-{day}" not in notified]
     if due:
@@ -127,7 +127,7 @@ def briefing(services: Services, ctx: Context, body: dict) -> dict:
     authorize(ctx, ["Owner", "Secretary", "Accountant", "Director"])
     day = today()
     candidates = ctx.query(kinds=OPEN_KINDS, **visibility_filters(ctx))
-    source = [r for r in candidates if r.get("status") not in ("Completed", "Closed") and accessible(ctx, r)]
+    source = [r for r in candidates if r.get("status") not in SETTLED_STATUSES and accessible(ctx, r)]
     overdue = [r for r in source if lt(r.get("due"), day)]
     upcoming = sorted([r for r in source if not lt(r.get("due"), day) and isinstance(r.get("due"), str)], key=lambda r: r["due"])[:6]
     review = [r for r in source if r.get("status") == "Under review"]

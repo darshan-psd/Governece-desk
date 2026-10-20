@@ -11,6 +11,7 @@ from sqlalchemy import select, update
 
 from app.api.deps import services_of
 from app.auth import csrf_for, issue_session
+from app.core.jsvalues import today
 from app.core.config import Settings
 from app.main import create_app
 from app.models import AuthSession, AuthToken, LoginAttempt, SecurityEvent, User
@@ -650,3 +651,206 @@ def test_forced_change_gate_still_works_if_the_flag_is_ever_set(client, firm):
     # The flag is cleared: ordinary endpoints work now, and /me no longer reports it pending.
     assert nora.call("/api/auth/me")["mustChangePassword"] is False
     assert nora.request("GET", "/api/v2").status_code == 200
+
+
+# Role changes ------------------------------------------------------------------------------------
+
+def team_role(api: Api, member: str, role, expect: int = 200) -> dict:
+    return api.call("/api/auth/team/role", {"member": member, "role": role}, expect)
+
+
+def membership_of(services, member_id: str):
+    with services.db.read() as session:
+        return IdentityRepository(session).membership_by_member("firm-a", member_id)
+
+
+def company_scope(services, member_id: str) -> list[str]:
+    with services.db.read() as session:
+        resolved = IdentityRepository(session).resolve(IdentityRepository(session).membership_by_member("firm-a", member_id).id)
+    return ["*"] if resolved.all_companies else sorted(resolved.company_ids)
+
+
+def test_owner_changes_a_team_members_role(client, firm):
+    """The role moves on the membership (what authorization reads) and on the workspace profile
+    (what the UI shows); company access is left exactly as it was."""
+    owner = login(client, "owner@firm-a.test", OWNER_PASSWORD)
+    assert company_scope(firm, "sec") == ["*"]
+    assert team_role(owner, "sec", "Accountant") == {"ok": True, "role": "Accountant"}
+    assert next(m["role"] for m in owner.call("/api/auth/team")["items"] if m["member"] == "sec") == "Accountant"
+    assert membership_of(firm, "sec").role == "Accountant"
+    assert next(m for m in owner.state()["members"] if m["id"] == "sec")["role"] == "Accountant"
+    assert company_scope(firm, "sec") == ["*"]  # unchanged by the role change
+
+
+def test_role_changes_are_owner_only_and_never_self(client, firm):
+    owner = login(client, "owner@firm-a.test", OWNER_PASSWORD)
+    with firm.db.write() as session:
+        set_credentials(session, membership_of(firm, "sec").id, "sec@firm-a.test", SECRETARY_PASSWORD)
+    secretary = login(client, "sec@firm-a.test", SECRETARY_PASSWORD)
+    team_role(secretary, "cli", "Secretary", expect=403)       # a Secretary cannot change roles
+    team_role(secretary, "sec", "Accountant", expect=403)      # nor their own
+    team_role(owner, "owner", "Secretary", expect=400)         # the Owner cannot demote themselves
+    assert membership_of(firm, "sec").role == "Secretary" and membership_of(firm, "owner").role == "Owner"
+    assert anon(client).call("/api/auth/team/role", {"member": "sec", "role": "Accountant"}, 401)
+
+
+def test_invalid_roles_are_rejected(client, firm):
+    owner = login(client, "owner@firm-a.test", OWNER_PASSWORD)
+    for role in ("Superuser", "", "secretary", None, 7, ["Secretary"]):
+        team_role(owner, "sec", role, expect=400)
+    team_role(owner, "sec", "Owner", expect=400)      # no second owner is appointed here
+    team_role(owner, "sec", "Secretary", expect=400)  # already that role: no empty audit entry
+    team_role(owner, "missing-member", "Secretary", expect=404)
+    assert membership_of(firm, "sec").role == "Secretary"
+
+
+def test_the_last_active_owner_cannot_lose_the_owner_role(client, firm):
+    """A second owner can be demoted while another active owner remains; the final active owner
+    cannot be demoted (the service re-checks under a row lock, as deactivation does)."""
+    from app.core.errors import BadRequest
+    from app.permissions import Context, WorkspaceStore
+    from app.services import auth_service
+
+    owner = login(client, "owner@firm-a.test", OWNER_PASSWORD)
+    with firm.db.write() as session:
+        add_member(session, "firm-a", "owner2", "Second Owner", "Owner", ["*"])
+        RecordRepository(session, "firm-a").insert("owner2", "member", {"name": "Second Owner", "role": "Owner", "companies": ["*"], "active": True})
+    assert team_role(owner, "owner2", "Director")["role"] == "Director"  # another active owner remains
+    assert membership_of(firm, "owner2").role == "Director"
+
+    # Only "owner" is an Owner now. Acting as a different membership, demoting it is refused.
+    store = WorkspaceStore(firm.db, "firm-a")
+    actor = Context(owner="firm-a", actor={"id": "owner2", "name": "Second Owner", "role": "Owner", "companies": ["*"]},
+                    store=store, membership_id=membership_of(firm, "owner2").id)
+    with pytest.raises(BadRequest, match="at least one active owner"):
+        auth_service.set_member_role(firm, actor, "owner", "Secretary", "127.0.0.1")
+    assert membership_of(firm, "owner").role == "Owner"
+
+
+def test_role_changes_stop_at_the_organization_boundary(client, firm):
+    owner = login(client, "owner@firm-a.test", OWNER_PASSWORD)
+    with firm.db.write() as session:
+        _org, owner_b = create_organization(session, "firm-b", "Firm B", "Bala Owner")
+        set_credentials(session, owner_b.id, "owner@firm-b.test", OWNER_PASSWORD)
+    other = login(client, "owner@firm-b.test", OWNER_PASSWORD)
+    team_role(other, "sec", "Accountant", expect=404)  # firm A's member is invisible to firm B
+    assert membership_of(firm, "sec").role == "Secretary"
+    team_role(owner, "owner", "Secretary", expect=400)
+    assert team_role(owner, "sec", "Director")["role"] == "Director"  # its own member is fine
+
+
+def test_a_new_role_applies_to_the_members_existing_session(client, firm):
+    """Requirement: no sign-out. The membership is resolved on every request."""
+    owner = login(client, "owner@firm-a.test", OWNER_PASSWORD)
+    with firm.db.write() as session:
+        set_credentials(session, membership_of(firm, "sec").id, "sec@firm-a.test", SECRETARY_PASSWORD)
+    secretary = login(client, "sec@firm-a.test", SECRETARY_PASSWORD)
+    task = {"company": "c1", "title": "Role change work", "due": "2026-12-01", "assignee": "sec"}
+    assert secretary.create("task", task)  # a Secretary may create work
+
+    team_role(owner, "sec", "Auditor")
+    assert secretary.request("GET", "/api/v2").status_code == 200  # the session is still valid
+    assert secretary.state()["actor"]["role"] == "Auditor"
+    secretary.create("task", {**task, "title": "Blocked for an auditor"}, 403)  # enforced at once
+
+    team_role(owner, "sec", "Accountant")
+    assert secretary.create("task", {**task, "title": "Allowed again", "assignee": "owner"})
+
+
+def test_staff_to_client_requires_specific_companies_and_reports_held_work(client, firm):
+    owner = login(client, "owner@firm-a.test", OWNER_PASSWORD)
+    with firm.db.write() as session:
+        set_credentials(session, membership_of(firm, "sec").id, "sec@firm-a.test", SECRETARY_PASSWORD)
+    secretary = login(client, "sec@firm-a.test", SECRETARY_PASSWORD)
+    task = secretary.create("task", {"company": "c1", "title": "Still assigned", "due": "2026-12-01", "assignee": "sec"})
+
+    # A client may never hold organization-wide access, so "*" must be narrowed first.
+    team_role(owner, "sec", "Client", expect=400)
+    assert membership_of(firm, "sec").role == "Secretary" and company_scope(firm, "sec") == ["*"]
+    owner.call("/api/auth/team/companies", {"member": "sec", "companies": ["c1"]})
+
+    result = team_role(owner, "sec", "Client")
+    assert result["role"] == "Client" and "1 internal record" in result["warning"]
+    assert membership_of(firm, "sec").all_companies == 0 and company_scope(firm, "sec") == ["c1"]
+    # The work itself is untouched: reassigning someone's records is the Owner's decision.
+    assert owner.get(task)["assignee"] == "sec"
+
+    # The demoted member now sees the portal view of c1 only, and no internal work.
+    assert secretary.state()["actor"]["role"] == "Client"
+    assert {r["kind"] for r in secretary.state()["records"]} <= {"company", "document", "request"}
+    assert [c["id"] for c in secretary.portal()["companies"]] == ["c1"]
+
+
+def test_client_to_staff_keeps_exactly_the_companies_the_client_had(client, firm):
+    owner = login(client, "owner@firm-a.test", OWNER_PASSWORD)
+    with firm.db.write() as session:
+        set_credentials(session, membership_of(firm, "cli").id, "cli@firm-a.test", SECRETARY_PASSWORD)
+    person = login(client, "cli@firm-a.test", SECRETARY_PASSWORD)
+    assert person.state()["actor"]["role"] == "Client"
+    owner.create("task", {"company": "c1", "title": "Internal c1 work", "due": "2026-12-01", "assignee": "owner"})
+    owner.create("task", {"company": "c2", "title": "Internal c2 work", "due": "2026-12-01", "assignee": "owner"})
+
+    assert team_role(owner, "cli", "Secretary")["role"] == "Secretary"
+    assert company_scope(firm, "cli") == ["c1"]  # not widened to "*"
+    titles = {r.get("title") for r in person.state()["records"]}
+    assert "Internal c1 work" in titles and "Internal c2 work" not in titles
+    assert next(m for m in owner.state()["members"] if m["id"] == "cli")["role"] == "Secretary"
+
+
+def test_role_changes_are_logged_in_the_audit_trail_and_security_events(client, firm):
+    owner = login(client, "owner@firm-a.test", OWNER_PASSWORD)
+    team_role(owner, "sec", "Director")
+    entry = next(a for a in owner.state()["audit"] if a["action"].startswith("Changed role to"))
+    assert entry["action"] == "Changed role to Director · Asha Owner" and entry["subject"] == "Sam Secretary"
+    assert entry["at"].endswith("Z")
+    event = events(firm, "member_role_changed")[-1]
+    detail = json.loads(event.detail)
+    assert detail["previous_role"] == "Secretary" and detail["role"] == "Director"
+    assert event.membership_id == membership_of(firm, "sec").id
+    assert detail["by"] == membership_of(firm, "owner").id
+    assert next(e for e in owner.call("/api/auth/security-events")["items"] if e["event"] == "member_role_changed")
+
+
+# Preparation data across a sign-out / sign-in cycle ----------------------------------------------
+
+def test_close_preparation_survives_sign_out_and_sign_in(client, firm):
+    """The reported Financial Close defect: a scoped Accountant saves preparation notes, a
+    checklist and supporting evidence, signs out, signs in again and must find all three."""
+    owner = login(client, "owner@firm-a.test", OWNER_PASSWORD)
+    with firm.db.write() as session:
+        membership = IdentityRepository(session).membership_by_member("firm-a", "acc")
+        if membership is None:
+            RecordRepository(session, "firm-a").insert("acc", "member", {
+                "name": "acc", "role": "Accountant", "companies": ["c1"], "active": True})
+            membership = add_member(session, "firm-a", "acc", "acc", "Accountant", ["c1"])
+        set_credentials(session, membership.id, "acc@firm-a.test", SECRETARY_PASSWORD)
+    acc = login(client, "acc@firm-a.test", SECRETARY_PASSWORD)
+
+    document = acc.upload("c1", content=b"account,debit,credit\nCash,100,0\nCapital,0,100", filename="tb.csv")
+    imported = acc.trial_balance("c1", period="2026-01")
+    owner.action(imported, "reviewImport")  # a different person must review the import
+    close = acc.create("close", {"company": "c1", "title": "January 2026 Financial Close", "due": today(),
+                                 "assignee": "acc", "period": "2026-01", "trialbalance": imported})
+    prepared = {"notes": "Reconcile bank balances, verify receivables and payables.",
+                "checklist": [{"id": "step-1", "label": "Reconcile bank", "done": True},
+                              {"id": "step-2", "label": "Review journals", "done": False}],
+                "evidence": [document]}
+    acc.edit(close, prepared)
+
+    # An unlabelled step is refused for this signed-in member too, and leaves the record alone.
+    saved = acc.get(close)
+    response = acc.request("POST", "/api/v2", json={"action": "edit", "id": close, "revision": saved["revision"],
+                                                    "data": {**prepared, "checklist": [{"label": "", "done": True}]}})
+    assert response.status_code == 400 and response.json()["error"] == "Give every checklist step a label."
+    assert acc.get(close)["revision"] == saved["revision"]
+
+    assert acc.request("POST", "/api/auth/logout", json={}).status_code == 200
+    assert acc.request("GET", "/api/v2").status_code == 401  # the session really ended
+
+    again = login(client, "acc@firm-a.test", SECRETARY_PASSWORD)
+    reloaded = again.get(close)
+    assert reloaded["id"] == close and reloaded["revision"] == saved["revision"]
+    assert reloaded["notes"] == prepared["notes"]
+    assert reloaded["checklist"] == prepared["checklist"]
+    assert reloaded["evidence"] == [document]
+    assert any(r["id"] == document for r in again.state()["records"])  # the evidence document is visible

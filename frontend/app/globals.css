@@ -25,3 +25,12 @@
 .password-field{position:relative}
 .password-field input{padding-right:40px}
 .password-toggle{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);font-size:11px;cursor:pointer;padding:4px 6px}
+/* Client portal · Requests */
+.portal-request-text{white-space:pre-wrap;font-size:12px;line-height:1.7;color:#4a5f75}
+.portal-action-row p.portal-request-fix{color:#a64c3b}
+.portal-request-action{font-size:11px;font-weight:600;color:#3e77b0;white-space:nowrap}
+.portal-request-upload>.btn{margin-bottom:4px}
+.portal-request-note{margin-top:22px}
+.portal-request-pointer{margin-top:22px;align-items:center}
+.portal-request-pointer .text-btn{display:inline;min-height:0;padding:0;margin:0}
+.portal-request-upload>.portal-form-heading:first-child{margin-top:25px!important;padding-top:22px;border-top:1px solid #e5edf4}

@@ -5,11 +5,17 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from app.core.errors import Forbidden
+from app.core.jsvalues import as_list
 from app.domain.workflow_rules import can_access
 from app.repositories.records import RecordRepository
 
 # Fields on company records that are internal to staff and must never reach a Client.
 CLIENT_HIDDEN_COMPANY_FIELDS = ("comments", "approval")
+# Fields on information requests that are internal to staff: the team's discussion of the request
+# (the record drawer's "Discussion" tab, where reviewers keep their notes) and who prepared or
+# reviewed it. The client still reads the request, the correction they were asked for
+# (``reviewNote``) and their own response.
+CLIENT_HIDDEN_REQUEST_FIELDS = ("comments", "preparer", "reviewedBy")
 _MISSING = object()
 
 
@@ -166,4 +172,13 @@ def client_safe(ctx: Context, record: dict) -> dict:
     """
     if ctx.role == "Client" and record.get("kind") == "company":
         return {k: v for k, v in record.items() if k not in CLIENT_HIDDEN_COMPANY_FIELDS}
+    if ctx.role == "Client" and record.get("kind") == "request":
+        safe = {k: v for k, v in record.items() if k not in CLIENT_HIDDEN_REQUEST_FIELDS}
+        if "evidence" in safe:
+            # Only documents the client may open: an unpublished file linked by staff is not even
+            # listed by id. Both callers have already read the company's documents (cached lookups).
+            ids = [i for i in as_list(record.get("evidence")) if isinstance(i, str)]
+            documents = ctx.find_many(ids, "document")
+            safe["evidence"] = [i for i in ids if i in documents and accessible(ctx, documents[i])]
+        return safe
     return record

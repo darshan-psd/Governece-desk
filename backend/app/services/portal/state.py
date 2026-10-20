@@ -9,9 +9,11 @@ from datetime import datetime, timedelta, timezone
 
 from app.core.jsvalues import gt, le, today, truthy
 from app.domain.portal_domain import ACT_SOURCE, DOCUMENT_CATEGORIES, INCORPORATION_SOURCE
-from app.domain.workflow_rules import can_access
-from app.permissions import CLIENT_HIDDEN_COMPANY_FIELDS, Context
+from app.domain.workflow_rules import CANCELLED, can_access
+from app.permissions import CLIENT_HIDDEN_COMPANY_FIELDS, Context, client_safe
 from app.services.portal.common import STAFF
+from app.services.portal.onboarding import PUBLISHABLE_WORK
+from app.services.portal.tracker import work_items
 
 PORTAL_KINDS = ["document", "invoice", "portalobligation", "onboarding", "thread", "request", "task"]
 # Above this many ids an IN (...) filter costs more than filtering the kind in Python.
@@ -69,10 +71,15 @@ def portal_state(ctx: Context, only_company: str | None = None) -> dict:
 
     ctx.find_many(r.get("sourceTask") for r in by_kind["portalobligation"])  # batch-load linked tasks
     obligations = []
+    # Client-safe timestamps of the internal record behind a published item, for the work tracker
+    # only: they are passed to the projection and never added to the portal payload.
+    mirrored: dict[str, dict] = {}
     for r in by_kind["portalobligation"]:
         source = ctx.find(r.get("sourceTask")) if r.get("sourceTask") is not None else None
         status = ("Review required" if truthy(source.get("reviewRequired")) else source.get("status")) if source else r.get("status")
         obligations.append({**r, "status": status, "due": (source or {}).get("due") or r.get("due")})
+        if source is not None:
+            mirrored[r["id"]] = {key: source.get(key) for key in ("created", "completedAt", "cancelledAt")}
 
     ctx.find_many(i for r in by_kind["onboarding"] for s in (r.get("stages") or []) for i in (s.get("evidence") or []))
     cases = []
@@ -86,6 +93,11 @@ def portal_state(ctx: Context, only_company: str | None = None) -> dict:
             stages.append({**s, "status": "Review required" if stale else s.get("status")})
         cases.append({**r, "stages": stages})
 
+    publishable = [] if is_client else [
+        *by_kind["task"],
+        *(r for r in ctx.query(kinds=[k for k in PUBLISHABLE_WORK if k != "task"],
+                               **_company_filter(ids, company_ids is not None)) if in_scope(r)),
+    ]
     actor_id = ctx.actor.get("id")
     threads = []
     for r in by_kind["thread"]:
@@ -94,14 +106,14 @@ def portal_state(ctx: Context, only_company: str | None = None) -> dict:
         threads.append({**r, "unread": unread})
     due = [
         *({"id": r["id"], "company": r.get("company"), "title": r.get("title"), "due": r.get("due"), "type": "Compliance"}
-          for r in obligations if truthy(r.get("due")) and r.get("status") not in ("Completed", "Not applicable")),
+          for r in obligations if truthy(r.get("due")) and r.get("status") not in ("Completed", "Not applicable", CANCELLED)),
         *({"id": r["id"], "company": r.get("company"), "title": "Invoice " + str(r.get("number")), "due": r.get("due"), "type": "Payment"}
           for r in invoices if r.get("status") == "Issued" and r["balance"] > 0),
         *({"id": f"{c['id']}-{s.get('id')}", "company": c.get("company"), "title": s.get("title"), "due": s.get("due"), "type": "Onboarding"}
           for c in cases for s in c["stages"] if truthy(s.get("due")) and s.get("status") != "Verified"),
     ]
     week = (datetime.now(timezone.utc) + timedelta(days=7)).date().isoformat()
-    return {
+    state = {
         "actor": ctx.actor,
         "companies": companies,
         "documents": documents,
@@ -110,14 +122,22 @@ def portal_state(ctx: Context, only_company: str | None = None) -> dict:
         "invoices": invoices,
         "payments": [r for r in payments_all if in_scope(r)],
         "threads": threads,
-        "requests": [r for r in by_kind["request"] if not is_client or r.get("assignee") == actor_id],
+        "requests": [client_safe(ctx, r) for r in by_kind["request"] if not is_client or r.get("assignee") == actor_id],
         "alerts": [r for r in due if le(r.get("due"), week)],
         "calendar": due,
         "documentCategories": DOCUMENT_CATEGORIES,
         "staff": ctx.role in STAFF,
         "today": today(),
         "sources": {"incorporation": INCORPORATION_SOURCE, "annual": ACT_SOURCE},
+        # Staff only: internal work a secretary may publish to this client's calendar. Clients
+        # receive an empty list, and nothing here is a source for the client work tracker.
         "internalTasks": [] if is_client else [
-            {"id": r["id"], "title": r.get("title"), "company": r.get("company"), "due": r.get("due")} for r in by_kind["task"]
+            {"id": r["id"], "kind": r["kind"], "title": r.get("title"), "company": r.get("company"),
+             "due": r.get("due"), "period": r.get("period"), "category": PUBLISHABLE_WORK[r["kind"]]}
+            for r in publishable if r.get("status") != CANCELLED
         ],
     }
+    # Client-facing work tracker, derived from the authorised data above (no extra queries, no
+    # new access path). ``internalTasks`` is not one of its sources.
+    state["work"] = work_items(state, mirrored=mirrored)
+    return state

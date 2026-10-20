@@ -105,6 +105,10 @@ class AuthSession(Base):
 # ``audit.owner``, so existing data belongs to the organization whose id equals its ``owner``.
 
 ROLES = ("Owner", "Secretary", "Accountant", "Director", "Auditor", "Client")
+# Roles an Owner can give a team member, when creating one or changing an existing one. ``Owner``
+# is not among them: an organization's Owner comes from creating the organization, and the
+# application has never had a path that appoints another one.
+ASSIGNABLE_ROLES = ("Secretary", "Accountant", "Director", "Client", "Auditor")
 STATUSES = ("active", "inactive")
 
 

@@ -11,7 +11,7 @@ from app.core.container import Services
 from app.core.errors import BadRequest, Conflict, Forbidden
 from app.core.jsvalues import as_list, js_number, now_iso, text, truthy
 from app.domain.portal_domain import ACT_SOURCE, ANNUAL_ITEMS, DOCUMENT_CATEGORIES, check_company_duplicates, company_profile
-from app.domain.workflow_rules import require_date
+from app.domain.workflow_rules import CANCELLED, require_date
 from app.permissions import Context
 from app.repositories.records import AuditRepository, RecordRepository
 from app.repositories.identity import IdentityRepository
@@ -20,6 +20,11 @@ from app.services.identity_service import add_member, apply_new_credentials, pre
 from app.services.portal.common import evidence, onboarding, portal_save, record, writer
 
 STAGE_STATUSES = ("Not started", "In progress", "Waiting for client", "Verified")
+# Internal work a secretary may publish to a client's calendar, and the client-facing category each
+# kind is shown under. Publishing never exposes the internal record: a ``portalobligation`` carries
+# only the title, due date, reporting period and status, which ``portal_state`` keeps mirrored.
+PUBLISHABLE_WORK = {"task": "Compliance", "close": "Financial close", "meeting": "Board meeting",
+                    "event": "Corporate event", "submission": "Regulatory submission"}
 OBLIGATION_STATUSES = ("Not started", "In progress", "Waiting for client", "Completed", "Not applicable")
 
 
@@ -196,19 +201,32 @@ def obligation_upsert(services: Services, ctx: Context, body: dict, c: dict, exi
 
 
 def publish_task(services: Services, ctx: Context, body: dict, c: dict) -> dict:
+    """Staff: publish one internal work record to this client's calendar.
+
+    Any of ``PUBLISHABLE_WORK`` may be published — a task, a financial close, a board meeting, a
+    corporate event or a regulatory submission — and the client still never reads the internal
+    record: the ``portalobligation`` written here carries its title, due date, reporting period and
+    status, and ``portal_state`` mirrors that status for as long as the link exists. Which work
+    becomes client-visible stays a decision the secretary takes per item, per company.
+    """
     writer(ctx)
-    task = ctx.find(body.get("task"), "task")
-    if task is None or task.get("company") != c["id"]:
-        raise BadRequest("Select a task from this company.")
-    # ``sourceTask`` is only set on portal obligations, published in the task's own company.
-    if ctx.exists(kinds=["portalobligation"], where={"company": c["id"], "sourceTask": task["id"]}):
-        raise BadRequest("This task is already in the portal.")
+    work = ctx.find(body.get("task") if truthy(body.get("task")) else body.get("work"))
+    if work is None or work.get("kind") not in PUBLISHABLE_WORK or work.get("company") != c["id"]:
+        raise BadRequest("Select internal work from this company.")
+    if work.get("status") == CANCELLED:
+        raise BadRequest("This work was cancelled and cannot be published to the client calendar.")
+    # ``sourceTask`` is only set on portal obligations, published in the work's own company.
+    if ctx.exists(kinds=["portalobligation"], where={"company": c["id"], "sourceTask": work["id"]}):
+        raise BadRequest("This work is already in the portal.")
     with services.db.write() as session:
-        RecordRepository(session, ctx.owner).insert(f"portal-{task['id']}", "portalobligation", {
-            "company": c["id"], "title": task.get("title"), "sourceTask": task["id"], "due": task.get("due"), "status": task.get("status"),
-            "source": task.get("source") or "Company secretary work register", "note": text(body.get("note")), "evidence": [],
+        RecordRepository(session, ctx.owner).insert(f"portal-{work['id']}", "portalobligation", {
+            "company": c["id"], "title": work.get("title"), "sourceTask": work["id"], "due": work.get("due"),
+            "status": work.get("status"), "category": PUBLISHABLE_WORK[work["kind"]],
+            "period": text(work.get("period")),
+            "source": work.get("source") or "Company secretary work register",
+            "note": text(body.get("note")), "evidence": [],
         })
-        AuditRepository.of(session, ctx).add(audit_label(ctx, "Published work to client calendar"), task.get("title"))
+        AuditRepository.of(session, ctx).add(audit_label(ctx, "Published work to client calendar"), work.get("title"))
     return {"ok": True}
 
 

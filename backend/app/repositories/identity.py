@@ -92,6 +92,18 @@ class IdentityRepository:
     def set_membership_status(self, membership_id: str, status: str) -> None:
         self.session.execute(update(Membership).where(Membership.id == membership_id).values(status=status, updated_at=now_iso()))
 
+    def set_membership_role(self, membership_id: str, role: str) -> None:
+        """Changes the organization-level role of one membership, leaving its company access alone.
+
+        ``resolve()`` reads the role on every request, so the new role applies to the member's next
+        request without them signing in again.
+        """
+        if role not in ROLES:
+            raise BadRequest("Unknown role.")
+        self.session.execute(update(Membership).where(Membership.id == membership_id).values(role=role, updated_at=now_iso()))
+        # The database also refuses a Client with organization-wide access (ck_memberships_client_scope).
+        self._flush("A client cannot have access to every company.")
+
     def grant_company(self, organization_id: str, membership_id: str, company_id: str) -> bool:
         """Idempotent. The database refuses companies of another organization or non-company records."""
         statement = insert_for(self.session, CompanyAccess).values(
