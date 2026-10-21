@@ -4,18 +4,25 @@
 // which the FastAPI backend serves. This config exists only so the frontend can be edited without
 // rebuilding; it never produces the deployed assets.
 //
-// The browser talks only to this server (127.0.0.1:5173) and every /api request is proxied to the
-// backend, so the two stay same-origin and the session cookies (SameSite=Strict, no Domain) keep
-// working. Use 127.0.0.1, not localhost: they are separate cookie origins.
+// The browser talks only to this dev server and every /api request is proxied to the backend,
+// so the two stay same-origin and the session cookies (SameSite=Strict, no Domain) keep working.
+// Locally use 127.0.0.1, not localhost: they are separate cookie origins.
 import {defineConfig} from 'vite';
 import react from '@vitejs/plugin-react';
 
 const API = process.env.GOVERNANCE_API_URL || 'http://ec2-13-201-73-29.ap-south-1.compute.amazonaws.com:8005';
 const origin = new URL(API).origin;
 
+// Port the dev server listens on. Must differ from the backend's port if both run on the same machine.
+const DEV_PORT = Number(process.env.DEV_PORT || 8005);
+
+// Hosts the dev server will accept in the Host header (Vite's DNS-rebinding guard).
+// The leading dot allows the domain and all its subdomains, so it survives EC2 hostname changes.
+const ALLOWED_HOSTS = ['.compute.amazonaws.com', 'localhost', '127.0.0.1'];
+
 // app.core.security.LocalSecurityMiddleware rejects an unrecognised Host (DNS-rebinding guard) and
 // any cross-site Origin. changeOrigin rewrites Host to the backend's; Origin is rewritten here, so
-// the backend sees a request from its own origin instead of the dev server's port.
+// the backend sees a request from its own origin instead of the dev server's.
 const api = {
   target: API,
   changeOrigin: true,
@@ -34,8 +41,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: '0.0.0.0',
-    port: 8005,
+    port: DEV_PORT,
     strictPort: true,
+    allowedHosts: ALLOWED_HOSTS,
     proxy: {'/api': api, '/health': api, '/ready': api},
   },
 });
