@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     # Built React assets (index.html, app.js, style.css) produced by `pnpm frontend:build`.
     governance_frontend_dir: Path = Field(default=PROJECT_DIR / ".sites-runtime" / "frontend")
 
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = 5174
     # Host header values to accept besides 127.0.0.1:<port> (comma separated). Required in
     # staging/production: the public host name(s), e.g. "desk.example.com".
