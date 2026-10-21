@@ -10,7 +10,7 @@
 import {defineConfig} from 'vite';
 import react from '@vitejs/plugin-react';
 
-const API = process.env.GOVERNANCE_API_URL || 'http://ec2-13-201-73-29.ap-south-1.compute.amazonaws.com:5174';
+const API = process.env.GOVERNANCE_API_URL || 'http://ec2-13-201-73-29.ap-south-1.compute.amazonaws.com:8005';
 const origin = new URL(API).origin;
 
 // app.core.security.LocalSecurityMiddleware rejects an unrecognised Host (DNS-rebinding guard) and
