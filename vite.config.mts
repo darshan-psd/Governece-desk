@@ -10,7 +10,7 @@
 import {defineConfig} from 'vite';
 import react from '@vitejs/plugin-react';
 
-const API = process.env.GOVERNANCE_API_URL || 'http://127.0.0.1:5174';
+const API = process.env.GOVERNANCE_API_URL || 'http://ec2-13-201-73-29.ap-south-1.compute.amazonaws.com:5174';
 const origin = new URL(API).origin;
 
 // app.core.security.LocalSecurityMiddleware rejects an unrecognised Host (DNS-rebinding guard) and
@@ -33,8 +33,8 @@ export default defineConfig({
   css: {postcss: {plugins: []}},
   plugins: [react()],
   server: {
-    host: '127.0.0.1',
-    port: 5173,
+    host: '0.0.0.0',
+    port: 8005,
     strictPort: true,
     proxy: {'/api': api, '/health': api, '/ready': api},
   },
