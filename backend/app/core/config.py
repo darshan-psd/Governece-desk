@@ -68,6 +68,10 @@ governance_allowed_hosts: str = (
     "localhost,127.0.0.1"
 )
 
+governance_auth_mode: Literal[
+        "local-preview", "password"
+    ] = "local-preview"
+
     # Authentication:
     # * "local-preview" (development/test only): opening the app issues an Owner session and
     #   "Preview as" switches profile. Refused in staging/production.
