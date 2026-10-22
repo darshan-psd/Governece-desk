@@ -63,11 +63,11 @@ class Settings(BaseSettings):
     port: int = 8000
     # Host header values to accept besides 127.0.0.1:<port> (comma separated). Required in
     # staging/production: the public host name(s), e.g. "desk.example.com".
-governance_allowed_hosts: str = (
-    "ec2-13-201-73-29.ap-south-1.compute.amazonaws.com,"
-    "localhost,127.0.0.1"
-)
-governance_auth_mode: Literal["local-preview", "password"] = "local-preview"
+    governance_allowed_hosts: str = (
+        "ec2-13-201-73-29.ap-south-1.compute.amazonaws.com,"
+        "localhost,127.0.0.1"
+    )
+    governance_auth_mode: Literal["local-preview", "password"] = "local-preview"
 
     # Authentication:
     # * "local-preview" (development/test only): opening the app issues an Owner session and
