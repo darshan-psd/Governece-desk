@@ -32,7 +32,7 @@ const DEV_PORT = Number(process.env.DEV_PORT || 8005);
 
 // The leading dot allows the domain and all its subdomains, so it survives EC2 hostname changes.
 
-const ALLOWED_HOSTS = ['http://ec2-13-201-73-29.ap-south-1.compute.amazonaws.com', 'localhost', '127.0.0.1'];
+const ALLOWED_HOSTS = ['desk.osparc.io', 'localhost', '127.0.0.1'];
  
 // app.core.security.LocalSecurityMiddleware rejects an unrecognised Host (DNS-rebinding guard) and
 
