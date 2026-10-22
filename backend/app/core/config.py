@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     governance_frontend_dir: Path = Field(default=PROJECT_DIR / ".sites-runtime" / "frontend")
 
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8005
     # Host header values to accept besides 127.0.0.1:<port> (comma separated). Required in
     # staging/production: the public host name(s), e.g. "desk.example.com".
     governance_allowed_hosts: str = (
