@@ -15,7 +15,7 @@ CLIENT_HIDDEN_COMPANY_FIELDS = ("comments", "approval")
 # (the record drawer's "Discussion" tab, where reviewers keep their notes) and who prepared or
 # reviewed it. The client still reads the request, the correction they were asked for
 # (``reviewNote``) and their own response.
-CLIENT_HIDDEN_REQUEST_FIELDS = ("comments", "preparer", "reviewedBy")
+CLIENT_HIDDEN_REQUEST_FIELDS = ("comments", "preparer", "reviewedBy", "clarificationBy")
 _MISSING = object()
 
 

@@ -86,6 +86,7 @@ def test_the_assigned_client_sees_the_request_and_what_answering_it_takes(firm):
     assert item["request"] == {
         "status": "Open", "revision": 1, "description": "Please upload the September bank statements.",
         "priority": "High", "response": None, "correction": None, "answerable": True,
+        "clarification": None, "clarificationAt": None,
     }
     assert item["documents"] == []
 

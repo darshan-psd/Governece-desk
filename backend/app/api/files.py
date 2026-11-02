@@ -48,6 +48,23 @@ async def download(request: Request):
     })
 
 
+@router.get("/api/v2-files/versions")
+async def versions(request: Request):
+    """Version history of a document (review workspace); a client sees only shared versions."""
+    ctx = await context_of(request)
+    result = await run_in_threadpool(documents_service.document_versions, services_of(request), ctx, request.query_params.get("id"))
+    return json_response(result, no_store=True)
+
+
+@router.post("/api/v2-files/revision")
+async def save_revision(request: Request):
+    """Saves an edited copy of a document as its next version (the original is never changed)."""
+    ctx = await context_of(request)
+    fields, incoming = await _read_form(request)
+    result = await run_in_threadpool(documents_service.save_revision, services_of(request), ctx, fields, incoming)
+    return json_response(result)
+
+
 @router.post("/api/v2-import")
 async def import_trial_balance(request: Request):
     ctx = await context_of(request)

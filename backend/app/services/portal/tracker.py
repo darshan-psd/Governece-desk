@@ -275,6 +275,9 @@ def _request_item(record: dict, shared: dict[str, dict], today: str) -> dict:
             # A resubmitted request keeps the correction it answers; a closed one has none.
             "correction": (text(record.get("reviewNote"), 2000) or None) if stored in ("Returned", "Responded") else None,
             "answerable": stored in REQUEST_ANSWERABLE,
+            # The reviewer's client-facing clarification notes (``request_notes``).
+            "clarification": text(record.get("clarification"), 20000) or None,
+            "clarificationAt": record.get("clarificationAt") if isinstance(record.get("clarificationAt"), str) else None,
         }},
     )
 

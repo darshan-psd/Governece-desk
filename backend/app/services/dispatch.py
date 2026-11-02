@@ -31,6 +31,7 @@ RECORD_ACTIONS: dict[str, Callable] = {
     "comment": records_service.comment,
     "respond": governance_service.respond,
     "requestDecision": governance_service.request_decision,
+    "requestNotes": governance_service.request_notes,
     "edit": records_service.edit,
     "transition": records_service.transition,
     "ruleStatus": governance_service.rule_status,

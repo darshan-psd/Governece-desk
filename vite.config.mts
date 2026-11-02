@@ -19,7 +19,23 @@
 import {defineConfig} from 'vite';
 
 import react from '@vitejs/plugin-react';
- 
+
+import {readFileSync} from 'node:fs';
+
+import {resolve} from 'node:path';
+
+// The document review workspace loads the PDF.js worker from /pdf.worker.js. The production build
+// copies it into .sites-runtime/frontend (scripts/build-frontend.mjs); the dev server serves it here.
+const pdfWorker = {
+  name: 'pdf-worker',
+  configureServer(server: {middlewares: {use: (path: string, handler: (req: unknown, res: {setHeader(n: string, v: string): void; end(b: Buffer): void}) => void) => void}}) {
+    server.middlewares.use('/pdf.worker.js', (_req, res) => {
+      res.setHeader('Content-Type', 'text/javascript');
+      res.end(readFileSync(resolve('node_modules/pdfjs-dist/build/pdf.worker.min.mjs')));
+    });
+  },
+};
+
 const API = process.env.GOVERNANCE_API_URL || 'http://ec2-13-201-73-29.ap-south-1.compute.amazonaws.com:8005';
 
 const origin = new URL(API).origin;
@@ -68,7 +84,7 @@ export default defineConfig({
 
   css: {postcss: {plugins: []}},
 
-  plugins: [react()],
+  plugins: [react(), pdfWorker],
 
   server: {
 

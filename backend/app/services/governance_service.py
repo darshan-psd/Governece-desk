@@ -123,6 +123,23 @@ def request_decision(services: Services, ctx: Context, body: dict, r: dict) -> d
                 "Closed request" if status == "Closed" else "Returned request")
 
 
+def request_notes(services: Services, ctx: Context, body: dict, r: dict) -> dict:
+    """Saves the reviewer's clarification notes on a request without changing its status.
+
+    The notes are client-facing instructions and observations (a light Markdown subset: bold,
+    italic, bullet and numbered lists), stored as text and rendered without HTML. Internal team
+    discussion stays in ``comments``.
+    """
+    authorize(ctx, EDIT_ROLES)
+    if r.get("kind") != "request":
+        raise BadRequest("Select an information request.")
+    if r.get("status") == "Closed":
+        raise BadRequest("This request is closed.")
+    notes = text(body.get("clarification"), 20000)
+    return save(services, ctx, r, {**r, "clarification": notes, "clarificationBy": ctx.actor["id"], "clarificationAt": now_iso()},
+                "Saved clarification notes")
+
+
 # Rule library ----------------------------------------------------------------------------
 
 def plans(ctx: Context, rule: dict, horizon: int = 90) -> list[dict]:
