@@ -10,6 +10,7 @@ import uuid
 from app.core.container import Services
 from app.core.errors import BadRequest, Conflict, Forbidden
 from app.core.jsvalues import as_list, js_number, now_iso, text, truthy
+from app.domain.client_access import COMPANY_ADMIN
 from app.domain.portal_domain import ACT_SOURCE, ANNUAL_ITEMS, DOCUMENT_CATEGORIES, check_company_duplicates, company_profile
 from app.domain.workflow_rules import CANCELLED, require_date
 from app.permissions import Context
@@ -38,6 +39,8 @@ def company_create(services: Services, ctx: Context, body: dict) -> dict:
     rejected password or a taken email leaves nothing behind — not a company with half-created
     client access.
     """
+    if any(grant.role != COMPANY_ADMIN for grant in ctx.client_access.values()):
+        raise Forbidden("Only a Company Admin can add a company.")
     client_name = text(body.get("clientName"))
     client_email = client_password = None
     if ctx.role != "Client" and client_name and truthy(body.get("clientEmail")):
@@ -73,6 +76,8 @@ def company_create(services: Services, ctx: Context, body: dict) -> dict:
 
 def company_save(services: Services, ctx: Context, body: dict, submit: bool) -> dict:
     c = record(ctx, body, "company")
+    if not ctx.client_can(c["id"], "profile.edit"):
+        raise Forbidden("Only a Company Admin can change the company profile.")
     data = company_profile(body.get("data"), submit)
     warning = check_company_duplicates(ctx.query(kinds=["company"]), data, exclude_id=c["id"])
     result = portal_save(services, ctx, c, {

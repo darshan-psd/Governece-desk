@@ -23,6 +23,9 @@ class AuthRepository:
     def user_by_email(self, email: str) -> User | None:
         return self.session.scalars(select(User).where(func.lower(User.email) == email.lower())).first()
 
+    def user_by_username(self, username: str) -> User | None:
+        return self.session.scalars(select(User).where(func.lower(User.username) == username.lower())).first()
+
     def get_user(self, user_id: str) -> User | None:
         return self.session.get(User, user_id)
 
@@ -31,6 +34,20 @@ class AuthRepository:
             self.session.execute(update(User).where(User.id == user_id).values(email=email, updated_at=now_iso()))
         except IntegrityError as error:  # ux_users_email: another request claimed it first
             raise Conflict("This email address already belongs to another account.") from error
+
+    def set_username(self, user_id: str, username: str | None) -> None:
+        try:
+            self.session.execute(update(User).where(User.id == user_id).values(username=username, updated_at=now_iso()))
+        except IntegrityError as error:  # ux_users_username: another request claimed it first
+            raise Conflict("This username is already taken.") from error
+
+    def set_display_name(self, user_id: str, name: str) -> None:
+        self.session.execute(update(User).where(User.id == user_id).values(display_name=name, updated_at=now_iso()))
+
+    def close_account(self, user_id: str) -> None:
+        """A removed person can never sign in again; their username and email become free to use."""
+        self.session.execute(update(User).where(User.id == user_id).values(
+            status="inactive", username=None, email=None, password_hash=None, password_changed_at=None, updated_at=now_iso()))
 
     def set_password(self, user_id: str, password_hash: str, must_change_password: bool = False) -> None:
         """``must_change_password``: True for a temporary password (Owner-set); False clears it."""

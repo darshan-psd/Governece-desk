@@ -114,12 +114,12 @@ const Thumb = memo(function Thumb({ page, index, current, onPick }: { page: Page
 });
 
 // Viewer -----------------------------------------------------------------------------------------
-type Props = { bytes: ArrayBuffer; editable: boolean; author: string; onDirty: (dirty: boolean) => void; register: (api: ViewerApi | null) => void };
+type Props = { bytes: ArrayBuffer; editable: boolean; author: string; initialAnnotations?: Annotation[]; onDirty: (dirty: boolean) => void; register: (api: ViewerApi | null) => void };
 
-export default function PdfViewer({ bytes, editable, author, onDirty, register }: Props) {
+export default function PdfViewer({ bytes, editable, author, initialAnnotations, onDirty, register }: Props) {
     const [pdfjs, setPdfjs] = useState<PdfJs | null>(null), [doc, setDoc] = useState<Doc | null>(null), [pages, setPages] = useState<Page[]>([]), [error, setError] = useState('');
     const [zoom, setZoom] = useState<number | 'fit'>('fit'), [fitScale, setFitScale] = useState(1), [current, setCurrent] = useState(0), [near, setNear] = useState<Set<number>>(new Set([0, 1]));
-    const [thumbs, setThumbs] = useState(true), [tool, setTool] = useState<Tool>('select'), [annotations, setAnnotations] = useState<Annotation[]>([]), [selected, setSelected] = useState<string | null>(null);
+    const [thumbs, setThumbs] = useState(true), [tool, setTool] = useState<Tool>('select'), [annotations, setAnnotations] = useState<Annotation[]>(() => initialAnnotations ?? []), [selected, setSelected] = useState<string | null>(null);
     const [panel, setPanel] = useState(false), [query, setQuery] = useState(''), [hits, setHits] = useState<Hit[]>([]), [hitIndex, setHitIndex] = useState(0), [searching, setSearching] = useState(false), [pageInput, setPageInput] = useState('1');
     const [fileNotes, setFileNotes] = useState<FileNote[]>([]), [notice, setNotice] = useState('');
     const container = useRef<HTMLDivElement>(null), searchBox = useRef<HTMLInputElement>(null), textCache = useRef(new Map<number, { str: string; items: { start: number; end: number; item: any }[] }>());
@@ -268,7 +268,7 @@ export default function PdfViewer({ bytes, editable, author, onDirty, register }
         void PDFName;
         return new Uint8Array(await out.save());
     }, [annotations, bytes, author]);
-    useEffect(() => { register({ exportFile }); return () => register(null) }, [exportFile]);
+    useEffect(() => { register({ exportFile, draft: async () => annotations.filter(a => a.type === 'highlight' || a.text.trim()) }); return () => register(null) }, [exportFile]);
 
     if (error) return <div className="viewer-message" role="alert"><AlertCircle size={22} /><p>{error}</p></div>;
     if (!doc || !pdfjs) return <div className="viewer-message" aria-busy="true"><Loader2 size={22} className="spin" /><p>Opening PDF…</p></div>;

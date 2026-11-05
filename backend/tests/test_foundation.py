@@ -250,6 +250,7 @@ EXPECTED_INDEXES = sorted([
     "ix_login_attempts_key", "ix_security_events_org_at", "ix_security_events_at",
     "ux_records_invoice_number", "ux_records_payment_reference", "ux_records_trialbalance_file",  # 0004
     "ux_records_company_registration", "ux_records_company_pan", "ux_records_company_gstin",  # 0006
+    "ux_users_username",  # 0007
 ])
 
 
@@ -257,7 +258,7 @@ EXPECTED_INDEXES = sorted([
 def test_fresh_database_is_created_by_migrations(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'fresh.sqlite'}")
     upgrade_to_head(engine)
-    assert current_revision(engine) == head_revision() == "0006_company_identifiers"
+    assert current_revision(engine) == head_revision() == "0007_client_team_members"
     engine.dispose()
     assert fingerprint(tmp_path / "fresh.sqlite")["indexes"] == EXPECTED_INDEXES
 

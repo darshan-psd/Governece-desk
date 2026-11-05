@@ -93,6 +93,9 @@ def upload_document(services: Services, ctx: Context, form: dict, file: Incoming
     if not _company_accessible(ctx, company):
         raise Forbidden("Company access is required.")
     request = _answerable_request(ctx, _field(form, "request"), company) if _field(form, "request") else None
+    # Anyone may answer a request addressed to them; the company's library is limited by role.
+    if request is None and not ctx.client_can(company, "documents.upload"):
+        raise Forbidden("Your role does not permit uploading company documents.")
     _validate_file(file)
 
     previous = _field(form, "previous")
@@ -205,8 +208,20 @@ def _request_of(ctx: Context, doc: dict) -> dict | None:
 
 
 def _edit_block_reason(ctx: Context, chain: list[dict], doc: dict) -> str | None:
-    """Why ``doc`` cannot be edited by this actor, or None when it can."""
-    if ctx.role not in EDIT_ROLES:
+    """Why ``doc`` cannot be edited by this actor, or None when it can.
+
+    Staff with edit rights may edit any document they can see. A client may edit only a document
+    sent for one of their own requests, and only while that request is waiting for their answer
+    (Open, or Returned for correction): once submitted, the files stay fixed for the review.
+    """
+    if ctx.role == "Client":
+        request = _request_of(ctx, doc)
+        if request is None or not accessible(ctx, request):
+            return "You can edit documents you sent for one of your requests."
+        if request.get("status") not in ANSWERABLE_REQUEST:
+            return ("This request is with your company secretary for review, so its documents are read-only. "
+                    "You can edit them again if your secretary asks for changes.")
+    elif ctx.role not in EDIT_ROLES:
         return "Your role can view this document but not edit it."
     if _extension(text(doc.get("name"), 255)) not in EDITABLE_EXTENSIONS:
         return "This format can be previewed but not edited here."
@@ -253,7 +268,7 @@ def save_revision(services: Services, ctx: Context, form: dict, file: IncomingFi
     saved it and when, and supersedes the parent exactly like an uploaded new version (dependent
     approvals are flagged for review). Saving does not submit or decide the request.
     """
-    authorize(ctx, EDIT_ROLES)
+    authorize(ctx, [*EDIT_ROLES, "Client"])  # a client's rights are narrowed in _edit_block_reason
     parent = ctx.find(_field(form, "id"), "document")
     if parent is None or not accessible(ctx, parent):
         raise NotFound("Document not found.")
@@ -279,7 +294,8 @@ def save_revision(services: Services, ctx: Context, form: dict, file: IncomingFi
         "category": parent.get("category") or "Other", "period": parent.get("period") or "", "name": parent.get("name"),
         "company": company, "key": key, "size": file.size, "hash": digest,
         "version": (parent.get("version") or 1) + 1, "previous": parent["id"],
-        "shared": form.get("shared") == "true", "uploadedBy": ctx.actor["id"], "uploadedAt": now_iso(),
+        # A client's own edit is always visible to them (and, like every document, to the staff).
+        "shared": ctx.role == "Client" or form.get("shared") == "true", "uploadedBy": ctx.actor["id"], "uploadedAt": now_iso(),
         "scanStatus": "Not scanned", "editKind": EDIT_KIND[extension], "editNote": _field(form, "note").strip()[:2000],
         **({"request": request["id"]} if request else {}),
     }

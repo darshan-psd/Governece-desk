@@ -22,7 +22,7 @@ async def workspace_state(request: Request):
         if pack_id:
             html = await run_in_threadpool(governance_service.pack_html, ctx, pack_id)
             return attachment(html, "text/html; charset=utf-8", "governance-evidence-pack.html")
-        csv = await run_in_threadpool(intelligence_service.report_csv, ctx)
+        csv = await run_in_threadpool(intelligence_service.report_csv, ctx, params.get("company") or None)
         return attachment(csv, "text/csv", "governance-report.csv")
     body = await run_in_threadpool(records_service.read_state_json, services_of(request), ctx)
     return Response(body, media_type="application/json", headers=NO_STORE)

@@ -167,21 +167,42 @@ def plans(ctx: Context, rule: dict, horizon: int = 90) -> list[dict]:
     return result
 
 
+# "In progress" is not a rule status: editing a rule under review used to leave it there (fixed in
+# ``records_service.edit``), with no way out. Such a rule is treated as a draft so it can be resubmitted.
+RULE_DRAFT_STATUSES = ("Draft", "In progress")
+
+
 def rule_status(services: Services, ctx: Context, body: dict, r: dict) -> dict:
+    """Rule lifecycle: Draft → Under review → Published, with independent publication.
+
+    * Submit (Draft → Under review): records who submitted it and when.
+    * Publish (Under review → Published): never by the rule's preparer (its creator or last editor).
+    * Return for corrections / withdraw (Under review → Draft): needs a reason. The preparer and the
+      version are unchanged, so returning a rule never lets its author publish it themselves.
+    * New revision (Published → Draft): the next version, prepared by whoever starts it.
+    """
     authorize(ctx, ["Owner", "Secretary", "Director"])
     if r.get("kind") != "rule":
         raise BadRequest("Rule not found.")
-    status = text(body.get("status"))
-    if status == "Under review" and r.get("status") == "Draft":
-        return save(services, ctx, r, {**r, "status": status}, "Submitted rule for review")
-    if status == "Published" and r.get("status") == "Under review":
+    status, current, now = text(body.get("status")), r.get("status"), now_iso()
+    if status == "Under review" and current in RULE_DRAFT_STATUSES:
+        return save(services, ctx, r, {**r, "status": status, "submittedBy": ctx.actor["id"], "submittedAt": now}, "Submitted rule for review")
+    if status == "Published" and current == "Under review":
         if r.get("preparer") == ctx.actor["id"]:
             raise BadRequest("A different reviewer must publish this rule.")
         if not text(r.get("source")):
             raise BadRequest("A source reference is required.")
-        return save(services, ctx, r, {**r, "status": status, "publishedBy": ctx.actor["id"], "publishedAt": now_iso()}, "Published reviewed rule")
-    if status == "Draft" and r.get("status") in ("Published", "Under review"):
-        return save(services, ctx, r, {**r, "status": status, "preparer": ctx.actor["id"], "ruleVersion": (r.get("ruleVersion") or 1) + 1, "publishedBy": None}, "Started new rule revision")
+        return save(services, ctx, r, {**r, "status": status, "publishedBy": ctx.actor["id"], "publishedAt": now, "reviewNote": None}, "Published reviewed rule")
+    if status == "Draft" and current == "Under review":
+        reason = text(body.get("reason"), 2000)
+        if not reason:
+            raise BadRequest("Explain what needs to be corrected before returning the rule.")
+        withdrawn = r.get("preparer") == ctx.actor["id"]
+        return save(services, ctx, r, {**r, "status": status, "reviewNote": reason, "returnedBy": ctx.actor["id"], "returnedAt": now},
+                    "Withdrew rule from review" if withdrawn else "Returned rule for corrections")
+    if status == "Draft" and current == "Published":
+        return save(services, ctx, r, {**r, "status": status, "preparer": ctx.actor["id"], "ruleVersion": (r.get("ruleVersion") or 1) + 1,
+                                       "publishedBy": None, "reviewNote": None}, "Started new rule revision")
     raise BadRequest("This rule transition is not allowed.")
 
 

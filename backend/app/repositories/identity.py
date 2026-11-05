@@ -1,6 +1,7 @@
 """Data access for organizations, users, memberships, company access and background leases."""
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import BadRequest, Conflict
 from app.core.jsvalues import now_iso
 from app.database.dialect import insert_for
+from app.domain.client_access import EMPLOYEE
 from app.models import ROLES, BackgroundLease, CompanyAccess, Membership, Organization, User
 
 
@@ -30,6 +32,8 @@ class ResolvedMembership:
     all_companies: bool
     company_ids: tuple[str, ...]
     must_change_password: bool = False
+    # (company id, client role, stored modules) of each company_access row.
+    client_grants: tuple[tuple[str, str | None, str | None], ...] = ()
 
     @property
     def active(self) -> bool:
@@ -104,24 +108,44 @@ class IdentityRepository:
         # The database also refuses a Client with organization-wide access (ck_memberships_client_scope).
         self._flush("A client cannot have access to every company.")
 
-    def grant_company(self, organization_id: str, membership_id: str, company_id: str) -> bool:
+    def grant_company(self, organization_id: str, membership_id: str, company_id: str, client_role: str | None = None) -> bool:
         """Idempotent. The database refuses companies of another organization or non-company records."""
         statement = insert_for(self.session, CompanyAccess).values(
             organization_id=organization_id, membership_id=membership_id, company_id=company_id, created_at=now_iso(),
+            client_role=client_role,
         ).on_conflict_do_nothing().returning(CompanyAccess.company_id)  # rowcount is unreliable for INSERT
         return self.session.execute(statement).first() is not None
+
+    def revoke_company(self, organization_id: str, membership_id: str, company_id: str) -> None:
+        self.session.execute(delete(CompanyAccess).where(
+            CompanyAccess.organization_id == organization_id, CompanyAccess.membership_id == membership_id,
+            CompanyAccess.company_id == company_id))
+
+    def set_client_role(self, organization_id: str, membership_id: str, company_id: str, role: str, modules: list[str] | None) -> None:
+        """A client user's role inside one company; their other companies are untouched."""
+        self.session.execute(update(CompanyAccess).where(
+            CompanyAccess.organization_id == organization_id, CompanyAccess.membership_id == membership_id,
+            CompanyAccess.company_id == company_id,
+        ).values(client_role=role, client_modules=json.dumps(modules) if modules is not None else None))
 
     def set_company_scope(self, organization_id: str, membership_id: str, company_ids: list[str]) -> None:
         """Replaces a membership's company access with exactly ``company_ids``: revokes whatever
         isn't listed, grants whatever is missing, and clears ``all_companies`` (this path never
-        grants ``"*"`` — only the specific companies the Owner selected)."""
+        grants ``"*"`` — only the specific companies the Owner selected).
+
+        A company added to someone with an explicit client role (a team member) starts as an
+        Employee with no modules: being on one company's team is never admin rights at another.
+        Kept companies keep their role, and primary client contacts stay as they are."""
+        team_member = self.session.scalars(select(CompanyAccess.company_id).where(
+            CompanyAccess.organization_id == organization_id, CompanyAccess.membership_id == membership_id,
+            CompanyAccess.client_role.is_not(None)).limit(1)).first() is not None
         self.session.execute(update(Membership).where(Membership.id == membership_id, Membership.organization_id == organization_id)
                              .values(all_companies=0, updated_at=now_iso()))
         self.session.execute(delete(CompanyAccess).where(
             CompanyAccess.organization_id == organization_id, CompanyAccess.membership_id == membership_id,
             CompanyAccess.company_id.notin_(company_ids)))
         for company_id in company_ids:
-            self.grant_company(organization_id, membership_id, company_id)
+            self.grant_company(organization_id, membership_id, company_id, client_role=EMPLOYEE if team_member else None)
 
     def resolve(self, membership_id: str) -> ResolvedMembership | None:
         row = self.session.execute(text(
@@ -130,12 +154,14 @@ class IdentityRepository:
             "WHERE m.id = :id"), {"id": membership_id}).first()
         if row is None:
             return None
-        companies = tuple(self.session.scalars(
-            select(CompanyAccess.company_id).where(CompanyAccess.membership_id == membership_id, CompanyAccess.organization_id == row[0])
+        grants = tuple((access[0], access[1], access[2]) for access in self.session.execute(
+            select(CompanyAccess.company_id, CompanyAccess.client_role, CompanyAccess.client_modules)
+            .where(CompanyAccess.membership_id == membership_id, CompanyAccess.organization_id == row[0])
             .order_by(CompanyAccess.created_at, CompanyAccess.company_id)))
         return ResolvedMembership(organization_id=row[0], organization_status=row[1], user_id=row[2], user_status=row[3],
                                   membership_id=row[4], member_id=row[5], role=row[6], status=row[7],
-                                  all_companies=bool(row[8]), company_ids=companies, must_change_password=bool(row[9]))
+                                  all_companies=bool(row[8]), company_ids=tuple(g[0] for g in grants),
+                                  must_change_password=bool(row[9]), client_grants=grants)
 
     # Background leases -------------------------------------------------------------------------
     def acquire_lease(self, name: str, holder: str, seconds: int) -> bool:

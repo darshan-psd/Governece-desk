@@ -14,6 +14,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.database.dialect import JsonDocument, json_text
+from app.domain.client_access import CLIENT_ROLES
 
 
 class Base(DeclarativeBase):
@@ -136,10 +137,14 @@ class User(Base):
         # Emails are optional until invitations exist, and unique regardless of case when present.
         Index("ux_users_email", func.lower(literal_column("email")), unique=True, sqlite_where=literal_column("email IS NOT NULL"),
               postgresql_where=literal_column("email IS NOT NULL")),
+        # Sign-in name of an account a Company Admin created; unique regardless of case when present.
+        Index("ux_users_username", func.lower(literal_column("username")), unique=True, sqlite_where=literal_column("username IS NOT NULL"),
+              postgresql_where=literal_column("username IS NOT NULL")),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    username: Mapped[str | None] = mapped_column(Text, nullable=True)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
@@ -185,7 +190,12 @@ class Membership(Base):
 
 class CompanyAccess(Base):
     """One company a membership may access. Both keys share ``organization_id``, so a membership can
-    never be granted a company of another organization (enforced by the foreign keys)."""
+    never be granted a company of another organization (enforced by the foreign keys).
+
+    ``client_role`` and ``client_modules`` apply to a Client membership only: its role inside this
+    company (``app.domain.client_access``; NULL is the company's primary client contact) and, for
+    an Employee, the portal modules assigned to them as a JSON array.
+    """
 
     __tablename__ = "company_access"
     __table_args__ = (
@@ -193,6 +203,7 @@ class CompanyAccess(Base):
         ForeignKeyConstraint(["organization_id", "membership_id"], ["organization_memberships.organization_id", "organization_memberships.id"],
                              name="fk_company_access_membership", ondelete="CASCADE"),
         ForeignKeyConstraint(["organization_id", "company_id"], ["records.owner", "records.id"], name="fk_company_access_company"),
+        CheckConstraint(f"client_role IS NULL OR {_in('client_role', CLIENT_ROLES)}", name="ck_company_access_client_role"),
         Index("ix_company_access_company", "organization_id", "company_id"),
     )
 
@@ -200,6 +211,8 @@ class CompanyAccess(Base):
     membership_id: Mapped[str] = mapped_column(Text, nullable=False)
     company_id: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    client_role: Mapped[str | None] = mapped_column(Text, nullable=True)
+    client_modules: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class BackgroundLease(Base):

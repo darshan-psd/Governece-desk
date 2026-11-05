@@ -121,7 +121,7 @@ def test_sign_in_issues_a_secure_session_bound_to_the_membership(client, firm):
 def test_failed_sign_in_is_generic_and_recorded(client, firm, email, password):
     response = anon(client).request("POST", "/api/auth/login", json={"email": email, "password": password})
     assert response.status_code == 401
-    assert response.json() == {"error": "The email or password is incorrect."}
+    assert response.json() == {"error": "The username, email or password is incorrect."}
     assert SESSION not in response.cookies
     assert len(events(firm, "sign_in_failed")) == 1
 

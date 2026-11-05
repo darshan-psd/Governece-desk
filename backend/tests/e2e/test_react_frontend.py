@@ -37,8 +37,10 @@ def _free_port() -> int:
 @pytest.fixture(scope="module")
 def server(tmp_path_factory):
     port = _free_port()
+    # GOVERNANCE_DATABASE_URL is set empty on purpose: without it the server would read backend/.env
+    # and test against the configured database. Empty means a throwaway SQLite file in the data dir.
     env = {**os.environ, "GOVERNANCE_ENVIRONMENT": "test", "GOVERNANCE_DATA_DIR": str(tmp_path_factory.mktemp("e2e-data")),
-           "GOVERNANCE_REMINDERS_ENABLED": "false"}
+           "GOVERNANCE_REMINDERS_ENABLED": "false", "GOVERNANCE_DATABASE_URL": "", "GOVERNANCE_AUTH_MODE": "local-preview", "HOST": "127.0.0.1"}
     process = subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
                                cwd=BACKEND, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     base = f"http://127.0.0.1:{port}"
@@ -267,11 +269,10 @@ def test_module_forms_edits_and_actions(page):
     nav(page, "My work")
     expect(page.locator("main").get_by_text("Obtain consent and disclosures").filter(visible=True).first).to_be_visible()
 
-    create_via_form(page, "Client requests", "New information request", {"Title *": "Bank statements Q3", **common}, "Create information request")
     create_via_form(page, "Rule library", "New recurring rule", {"Title *": "Monthly GST review", "Company *": "Forms Co",
                     "First anchor date *": "2026-12-01", "Responsible person *": "Workspace owner", "Frequency *": "Monthly",
                     "Days after anchor *": "10", "Source / internal policy reference *": "Internal policy GST-1"}, "Create recurring rule")
-    create_via_form(page, "Submissions", "New submission", {"Title *": "MCA filing", **common, "Approved task *": "Obtain consent and disclosures"},
+    create_via_form(page, "Submissions", "New submission", {"Title *": "MCA filing", **common, "Approved task *": "Obtain consent and disclosures · Not started (not approved yet)"},
                     "Create submission")
 
     # Accounting: trial-balance CSV import (multipart) and a financial close.
@@ -347,7 +348,7 @@ def test_client_answers_a_request_in_the_portal_and_staff_review_it(page):
     page.get_by_role("button", name="Submit for review").click()
     toast(page, "Submitted to your secretary for review")
     expect(page.get_by_role("dialog")).to_contain_text("Submitted. Your secretary is reviewing it")
-    page.get_by_role("button", name="Close portal dialog").click()
+    page.get_by_role("button", name="Close review workspace").click()
     page.get_by_role("button", name="Work Tracker", exact=True).first.click()
     expect(row()).to_contain_text("Under Review")
     no_error(page, "client submits request")
@@ -372,10 +373,10 @@ def test_client_answers_a_request_in_the_portal_and_staff_review_it(page):
     page.get_by_label("Document for this request").set_input_files({"name": "statements-q3-v2.txt", "mimeType": "text/plain", "buffer": b"Q3 + Sep"})
     page.get_by_role("button", name="Upload to this request").click()
     toast(page, "Document uploaded to this request")
-    page.get_by_label(re.compile("^Message to your secretary")).fill("Added September.")
+    page.get_by_role("textbox", name=re.compile("^Message to your secretary")).fill("Added September.")
     page.get_by_role("button", name="Resubmit for review").click()
     toast(page, "Submitted to your secretary for review")
-    page.get_by_role("button", name="Close portal dialog").click()
+    page.get_by_role("button", name="Close review workspace").click()
     no_error(page, "client resubmits request")
 
     # The employee sees both uploads and closes the request; both pages show it completed.

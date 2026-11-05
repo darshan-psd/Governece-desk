@@ -5,7 +5,7 @@ Governance Desk has two sign-in modes, chosen with `GOVERNANCE_AUTH_MODE`:
 | Mode | Where | What it does |
 |---|---|---|
 | `local-preview` | development, test only | Opening the app signs the browser in as the preview organization's Owner; **Preview as** switches profile. Refused at start-up in staging/production. |
-| `password` | any environment (required in staging/production) | Email + password sign-in, invitations, password reset, server-side sessions. |
+| `password` | any environment (required in staging/production) | Email or username + password sign-in, invitations, password reset, server-side sessions. |
 
 ## Why built-in authentication
 
@@ -56,6 +56,47 @@ map the provider's subject to `users.id`. MFA (TOTP) is **not implemented** yet 
 | `GET /api/auth/team`, `POST /api/auth/team/invite`, `POST /api/auth/team/status` | Owner | sign-in status, invitation, deactivation/reactivation |
 | `GET /api/auth/security-events` | Owner | paginated, organization-scoped |
 
+## Client team members
+
+A Company Admin creates accounts for their own company from **Team Members** in the client portal.
+There is no email, invitation or activation step: they choose a username and an initial password and
+give them to the person, who signs in straight away. The sign-in form takes an email or a username
+(`POST /api/auth/login` with `identifier`; `email` still works). A username never contains `@`, is
+unique across the whole deployment regardless of case, and is throttled and hashed exactly like
+email sign-in. Someone who signs in with a username has no reset email: their Company Admin, or the
+firm's Owner or Secretary, sets a new password, which ends all their sessions.
+
+Everyone on a client's team is a `Client` membership, which keeps them out of all internal work. Their
+role inside a company is on `company_access` (`client_role`, `client_modules`), one row per company.
+These roles are separate from the firm's own Director and Accountant. `client_role` NULL is a company's
+primary client contact, who acts as its Company Admin, so accounts from before this feature are
+unchanged. The rules live in `app/domain/client_access.py` and are enforced in `app/permissions`,
+so they hold on every route to the data (`/api/portal`, `/api/v2`, file downloads and exports):
+
+| Role | Sections |
+|---|---|
+| Company Admin | Everything, including Team Members, editing the company profile and uploading |
+| Director | Work Tracker, company profile (view), onboarding, documents, compliance calendar |
+| Accountant | Financial documents, invoices and payments, uploading (payment proof) |
+| Employee | Only the sections assigned to them; `invoices` also allows uploading payment proof |
+
+Everyone also has Overview, the requests addressed to them, the documents sent for those requests
+and whatever they uploaded themselves.
+
+Two rules in `app/services/team_service.py` protect other people: account-level changes (name,
+username, password, deactivation) need authority over every company the person belongs to, while
+their role in this company and removing them from it need only this company; and a company always
+keeps an active Company Admin, checked under a row lock.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/portal/team?company=` | The company's team and counts |
+| `POST /api/portal/team/create` | Create an account |
+| `POST /api/portal/team/update` | Edit details and role |
+| `POST /api/portal/team/password` | Set a new password |
+| `POST /api/portal/team/status` | Deactivate or reactivate |
+| `POST /api/portal/team/remove` | Remove from this company (closes the account if it was their only one) |
+
 ## Bootstrapping the first owner
 
 From `backend/` with the target environment's variables set (`GOVERNANCE_AUTH_MODE=password`):
@@ -87,3 +128,4 @@ In development the default mail provider is `outbox`: emails are written to
   done by an operator today.
 * Email delivery for invitations and resets is synchronous within the request; it moves to the
   background job queue in Phase 7.
+* A Company Admin knows the initial password they set. `POST /api/auth/password/change` lets a member replace it, but the portal has no screen for that yet.

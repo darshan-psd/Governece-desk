@@ -51,7 +51,7 @@ async def me(request: Request):
 async def login(request: Request):
     services = services_of(request)
     body = await json_body(request)
-    result = await run_in_threadpool(auth_service.sign_in, services, body.get("email"), body.get("password"),
+    result = await run_in_threadpool(auth_service.sign_in, services, body.get("identifier") or body.get("email"), body.get("password"),
                                      body.get("organization"), _client(request), request.headers.get("user-agent"))
     if result.token is None:
         return json_response({"ok": False, "chooseOrganization": result.organizations}, no_store=True)

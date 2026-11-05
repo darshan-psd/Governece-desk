@@ -6,11 +6,16 @@ from typing import Any, Iterable
 
 from app.core.errors import Forbidden
 from app.core.jsvalues import as_list
+from app.domain.client_access import FINANCIAL_CATEGORIES, CompanyGrant
 from app.domain.workflow_rules import can_access
 from app.repositories.records import RecordRepository
 
-# Fields on company records that are internal to staff and must never reach a Client.
-CLIENT_HIDDEN_COMPANY_FIELDS = ("comments", "approval")
+# Fields on company records that are internal to staff and must never reach a Client (including the
+# Owner's active/inactive marking and its reason, see ``calendar_service.company_status``).
+CLIENT_HIDDEN_COMPANY_FIELDS = ("comments", "approval", "inactive", "inactiveReason", "statusChangedBy", "statusChangedAt")
+# All a team member without the company-profile permission receives of the company record: enough
+# to name the company they work for, none of its directors, shareholders, capital or identifiers.
+CLIENT_BASIC_COMPANY_FIELDS = ("id", "kind", "revision", "updated", "name", "tradingName")
 # Fields on information requests that are internal to staff: the team's discussion of the request
 # (the record drawer's "Discussion" tab, where reviewers keep their notes) and who prepared or
 # reviewed it. The client still reads the request, the correction they were asked for
@@ -90,6 +95,9 @@ class Context:
     membership_id: str | None = None
     user_id: str | None = None
     must_change_password: bool = False
+    # A Client's position in each of their companies (``app.domain.client_access``).
+    client_access: dict[str, CompanyGrant] = field(default_factory=dict, repr=False)
+    _own_requests: tuple[set[str], set[str]] | None = field(default=None, init=False, repr=False)
 
     @property
     def organization_id(self) -> str:
@@ -107,6 +115,22 @@ class Context:
         if self.role == "Owner" or "*" in companies:
             return None
         return [c for c in companies if isinstance(c, str)]
+
+    def client_can(self, company_id: Any, permission: str) -> bool:
+        """Whether a Client holds ``permission`` in a company. Fails closed for a company they have
+        no grant for. Staff are not narrowed here: their role and company scope already decide."""
+        if self.role != "Client":
+            return True
+        grant = self.client_access.get(company_id) if isinstance(company_id, str) else None
+        return grant is not None and permission in grant.permissions
+
+    def own_requests(self) -> tuple[set[str], set[str]]:
+        """The requests addressed to this person, and the documents listed on them (one query per request cycle)."""
+        if self._own_requests is None:
+            requests = self.store.find(kinds=["request"], where={"assignee": self.actor.get("id")})
+            self._own_requests = ({r["id"] for r in requests},
+                                  {i for r in requests for i in as_list(r.get("evidence")) if isinstance(i, str)})
+        return self._own_requests
 
     # Lookups (all SQL-backed, cached per request) -------------------------------------------
     def find(self, record_id, kind: str | None = None) -> dict | None:
@@ -136,6 +160,23 @@ def authorize(ctx: Context, roles: Iterable[str]) -> None:
         raise Forbidden("Your role does not permit this action.")
 
 
+def client_may_read_document(ctx: Context, record: dict) -> bool:
+    """Which of a company's shared documents a Client may open, by their role in that company.
+
+    Whatever the role, a person can always open what they uploaded themselves and what was sent
+    for a request addressed to them (including its later edited versions).
+    """
+    company = record.get("company")
+    if ctx.client_can(company, "documents"):
+        return True
+    if ctx.client_can(company, "documents.financial") and record.get("category") in FINANCIAL_CATEGORIES:
+        return True
+    if record.get("uploadedBy") == ctx.actor.get("id"):
+        return True
+    requests, documents = ctx.own_requests()
+    return record.get("id") in documents or record.get("request") in requests
+
+
 def accessible(ctx: Context, record: dict) -> bool:
     """Whether the acting profile may see ``record`` (company scope + client restrictions)."""
     if not can_access(ctx.actor, record):
@@ -150,7 +191,7 @@ def accessible(ctx: Context, record: dict) -> bool:
         return (
             kind == "company"
             or (kind == "request" and record.get("assignee") == ctx.actor.get("id"))
-            or (kind == "document" and record.get("shared") is True)
+            or (kind == "document" and record.get("shared") is True and client_may_read_document(ctx, record))
         )
     return record.get("kind") != "member" or ctx.role != "Client"
 
@@ -171,6 +212,8 @@ def client_safe(ctx: Context, record: dict) -> dict:
     approval details on company records to Clients (the portal API already stripped them).
     """
     if ctx.role == "Client" and record.get("kind") == "company":
+        if not ctx.client_can(record.get("id"), "profile"):
+            return {k: v for k, v in record.items() if k in CLIENT_BASIC_COMPANY_FIELDS}
         return {k: v for k, v in record.items() if k not in CLIENT_HIDDEN_COMPANY_FIELDS}
     if ctx.role == "Client" and record.get("kind") == "request":
         safe = {k: v for k, v in record.items() if k not in CLIENT_HIDDEN_REQUEST_FIELDS}

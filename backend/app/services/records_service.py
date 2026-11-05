@@ -423,7 +423,8 @@ def edit(services: Services, ctx: Context, body: dict, r: dict) -> dict:
     updated = {
         **r, **data,
         **({"profileStatus": "Draft"} if r["kind"] == "company" and truthy(r.get("profileStatus")) else {}),
-        "status": "In progress" if r.get("status") == "Under review" else r.get("status"),
+        # Changing work under review sends it back for preparation; a rule's preparation status is Draft.
+        "status": ("Draft" if r["kind"] == "rule" else "In progress") if r.get("status") == "Under review" else r.get("status"),
         "preparer": ctx.actor["id"],
         "approval": None,
     }

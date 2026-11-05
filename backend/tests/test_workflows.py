@@ -290,3 +290,18 @@ def test_audit_trail_records_actor_and_action(workspace):
     entry = next(a for a in audit if a["subject"] == "Audited task")
     assert entry["action"] == "Created task · Workspace owner"
     assert entry["at"].endswith("Z")
+
+
+def test_report_csv_can_be_limited_to_one_company(workspace):
+    """The Reports page exports its company filter; without the parameter the export is unchanged."""
+    api, c, c2, common = workspace
+    api.create("task", {**common, "title": "Report task one"})
+    api.create("task", {**common, "company": c2, "title": "Report task two"})
+    everything = api.request("GET", "/api/v2?export=csv").text
+    assert "Report task one" in everything and "Report task two" in everything
+    one = api.request("GET", f"/api/v2?export=csv&company={c}").text
+    assert "Report task one" in one and "Report task two" not in one
+    header = everything.splitlines()[0]
+    assert one.splitlines()[0] == header
+    nothing = api.request("GET", "/api/v2?export=csv&company=no-such-company").text
+    assert nothing.splitlines() == [header]

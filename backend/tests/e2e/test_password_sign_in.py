@@ -44,8 +44,11 @@ services.db.dispose()
 def password_server(tmp_path_factory):
     data = tmp_path_factory.mktemp("e2e-password")
     port = _free_port()
+    # GOVERNANCE_DATABASE_URL is set empty on purpose: without it the server would read backend/.env
+    # and test against the configured database. Empty means a throwaway SQLite file in the data dir.
     env = {**os.environ, "GOVERNANCE_ENVIRONMENT": "test", "GOVERNANCE_DATA_DIR": str(data), "GOVERNANCE_REMINDERS_ENABLED": "false",
-           "GOVERNANCE_AUTH_MODE": "password", "GOVERNANCE_MAIL_PROVIDER": "outbox", "GOVERNANCE_PUBLIC_URL": f"http://127.0.0.1:{port}"}
+           "GOVERNANCE_DATABASE_URL": "", "GOVERNANCE_AUTH_MODE": "password", "GOVERNANCE_MAIL_PROVIDER": "outbox", "HOST": "127.0.0.1",
+           "GOVERNANCE_PUBLIC_URL": f"http://127.0.0.1:{port}"}
     subprocess.run([sys.executable, "-c", BOOTSTRAP], cwd=BACKEND, env=env, check=True)
     process = subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
                                cwd=BACKEND, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -93,7 +96,7 @@ def test_sign_in_invite_activate_and_sign_out(password_server):
         owner.get_by_label("Email").fill("erin@e2e.test")
         owner.get_by_role("textbox", name="Password *", exact=True).fill("not the right password")
         owner.get_by_role("button", name="Sign in").click()
-        expect(owner.get_by_role("alert")).to_contain_text("The email or password is incorrect.")
+        expect(owner.get_by_role("alert")).to_contain_text("The username, email or password is incorrect.")
         sign_in(owner, base, "erin@e2e.test", OWNER_PASSWORD)
         expect(owner.locator(".account-strip")).to_contain_text("Erin Owner · Owner · erin@e2e.test")
         expect(owner.get_by_text("LOCAL PREVIEW")).to_have_count(0)
@@ -187,7 +190,7 @@ def test_owner_creates_member_with_a_working_password(password_server):
         retry_page.get_by_label("Email").fill("priya@e2e.test")
         retry_page.get_by_role("textbox", name="Password *", exact=True).fill("the wrong phrase entirely")
         retry_page.get_by_role("button", name="Sign in").click()
-        expect(retry_page.get_by_role("alert")).to_contain_text("The email or password is incorrect.")
+        expect(retry_page.get_by_role("alert")).to_contain_text("The username, email or password is incorrect.")
         retry_page.get_by_role("textbox", name="Password *", exact=True).fill("a starter owned pass phrase")
         retry_page.get_by_role("button", name="Sign in").click()
         retry_page.get_by_text("Good work starts with a clear view.").wait_for()

@@ -8,7 +8,7 @@ from app.core.errors import BadRequest, Conflict, NotFound
 from app.core.jsvalues import as_list, js_string, truthy, unique
 from app.domain.portal_domain import INCORPORATION_SOURCE, STAGES
 from app.domain.workflow_rules import can_access
-from app.permissions import Context, authorize
+from app.permissions import Context, accessible, authorize
 from app.services.context import same_revision, save
 
 STAFF = ["Owner", "Secretary", "Accountant"]
@@ -42,7 +42,7 @@ def evidence(ctx: Context, ids: Any, company_id: str) -> list[str]:
     documents = ctx.find_many(out, "document")
     for doc_id in out:
         d = documents.get(doc_id)
-        if d is None or d.get("company") != company_id or not truthy(d.get("shared")) or truthy(d.get("supersededBy")):
+        if d is None or d.get("company") != company_id or not truthy(d.get("shared")) or truthy(d.get("supersededBy")) or not accessible(ctx, d):
             raise BadRequest("Attach current documents shared with this company portal.")
     return out
 

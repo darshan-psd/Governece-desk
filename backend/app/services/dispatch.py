@@ -9,10 +9,10 @@ from __future__ import annotations
 from typing import Callable
 
 from app.core.container import Services
-from app.core.errors import BadRequest, NotFound
+from app.core.errors import BadRequest, Forbidden, NotFound
 from app.core.jsvalues import text, truthy
 from app.permissions import Context, authorize
-from app.services import documents_service, governance_service, intelligence_service, records_service
+from app.services import calendar_service, documents_service, governance_service, intelligence_service, records_service
 from app.services.context import target
 from app.services.portal import billing, onboarding
 from app.services.portal.common import STAFF, company
@@ -24,6 +24,9 @@ WORKSPACE_ACTIONS: dict[str, Callable] = {
     "member": records_service.member,
     "automation": intelligence_service.automation,
     "briefing": intelligence_service.briefing,
+    "templateCreate": calendar_service.template_create,
+    "calendarPreview": calendar_service.calendar_preview,
+    "calendarApply": calendar_service.calendar_apply,
 }
 # Actions on the record identified by ``id`` + ``revision``.
 RECORD_ACTIONS: dict[str, Callable] = {
@@ -43,6 +46,11 @@ RECORD_ACTIONS: dict[str, Callable] = {
     "pack": governance_service.pack,
     "noticeRead": intelligence_service.notice_read,
     "dispatchEmail": intelligence_service.dispatch_email,
+    "templateSave": calendar_service.template_save,
+    "templateDuplicate": calendar_service.template_duplicate,
+    "templateArchive": calendar_service.template_archive,
+    "confirmDue": calendar_service.confirm_due,
+    "companyStatus": calendar_service.company_status,
 }
 
 
@@ -78,6 +86,13 @@ COMPANY_ACTIONS: dict[str, Callable] = {
 }
 
 
+# The portal module a Client needs for an action; the rest are staff-only or checked in the service.
+CLIENT_ACTION_MODULE: dict[str, str] = {
+    "threadCreate": "inbox", "threadReply": "inbox", "threadRead": "inbox", "threadStatus": "inbox",
+    "paymentReport": "invoices",
+}
+
+
 def portal_mutate(services: Services, ctx: Context, body: dict) -> dict:
     action = text(body.get("action"))
     authorize(ctx, [*STAFF, "Client"])
@@ -95,4 +110,6 @@ def portal_mutate(services: Services, ctx: Context, body: dict) -> dict:
     handler = COMPANY_ACTIONS.get(action)
     if handler is None:
         raise BadRequest("Unknown portal action.")
+    if action in CLIENT_ACTION_MODULE and not ctx.client_can(c["id"], CLIENT_ACTION_MODULE[action]):
+        raise Forbidden("Your role does not permit this action.")
     return handler(services, ctx, body, c)

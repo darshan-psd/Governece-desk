@@ -8,6 +8,7 @@ from sqlalchemy import select, union_all
 from app.auth import BUILTIN_OWNER, SIGN_IN_MESSAGE, Principal
 from app.core.container import Services
 from app.core.errors import Conflict, Forbidden, NotFound, Unauthorized
+from app.domain.client_access import company_grant
 from app.permissions import Context, WorkspaceStore, accessible
 from app.models import Record, json_field
 from app.repositories.identity import IdentityRepository
@@ -50,9 +51,10 @@ def load_context(services: Services, principal: Principal, require_password_set:
             raise Forbidden("This workspace profile is not active.")
         profile = dict(BUILTIN_OWNER)
     actor = {**profile, "role": resolved.role, "companies": resolved.companies, "active": True}
+    client_access = {c: company_grant(role, modules) for c, role, modules in resolved.client_grants} if resolved.role == "Client" else {}
     return Context(owner=resolved.organization_id, actor=actor, store=store,
                    membership_id=resolved.membership_id, user_id=resolved.user_id,
-                   must_change_password=resolved.must_change_password)
+                   must_change_password=resolved.must_change_password, client_access=client_access)
 
 
 def visibility_filters(ctx: Context) -> dict:

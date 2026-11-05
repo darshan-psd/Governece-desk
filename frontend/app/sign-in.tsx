@@ -145,13 +145,14 @@ export default function AuthGate(){
 function SignIn({notice,onForgot,onDone}:{notice?:string,onForgot:()=>void,onDone:()=>void}){
  const [email,setEmail]=useState(''),[password,setPassword]=useState(''),[organizations,setOrganizations]=useState<{id:string,name:string}[]>([]),[organization,setOrganization]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
  async function submit(e:React.FormEvent){e.preventDefault();if(busy)return;setBusy(true);setError('');try{
-  const result=await post('/api/auth/login',{email,password,...(organization?{organization}:{})});
+  // ``email`` as well: a server still on the previous version (a deploy in progress) reads only that field.
+  const result=await post('/api/auth/login',{identifier:email,email,password,...(organization?{organization}:{})});
   if(result.ok){setPassword('');await onDone();return}
   setOrganizations(result.chooseOrganization||[]);setOrganization(result.chooseOrganization?.[0]?.id||'');
  }catch(err:any){setError(err.message)}finally{setBusy(false)}}
- return <form onSubmit={submit} className="auth-form"><h1>Sign in</h1><p className="muted">Use the email address your workspace owner gave you.</p>
+ return <form onSubmit={submit} className="auth-form"><h1>Sign in</h1><p className="muted">Use the email address or username you were given.</p>
   {notice&&<p className="auth-notice" role="status">{notice}</p>}
-  <label className="field"><span>Email<em> *</em></span><input type="email" autoComplete="username" required value={email} onChange={e=>setEmail(e.target.value)} disabled={busy}/></label>
+  <label className="field"><span>Email or username<em> *</em></span><input type="text" autoComplete="username" autoCapitalize="none" spellCheck={false} required value={email} onChange={e=>setEmail(e.target.value)} disabled={busy}/></label>
   <PasswordField label="Password" value={password} onChange={setPassword} autoComplete="current-password" disabled={busy}/>
   {organizations.length>0&&<label className="field"><span>Workspace</span><select value={organization} onChange={e=>setOrganization(e.target.value)}>{organizations.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</select></label>}
   {error&&<p role="alert" className="auth-error">{error}</p>}
@@ -163,7 +164,7 @@ function SignIn({notice,onForgot,onDone}:{notice?:string,onForgot:()=>void,onDon
 function Forgot({onBack}:{onBack:()=>void}){
  const [email,setEmail]=useState(''),[sent,setSent]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
  async function submit(e:React.FormEvent){e.preventDefault();if(busy)return;setBusy(true);setError('');try{setSent((await post('/api/auth/password/forgot',{email})).message)}catch(err:any){setError(err.message)}finally{setBusy(false)}}
- return <form onSubmit={submit} className="auth-form"><h1>Reset your password</h1><p className="muted">We will email a link that is valid for a short time.</p>
+ return <form onSubmit={submit} className="auth-form"><h1>Reset your password</h1><p className="muted">We will email a link that is valid for a short time. If you sign in with a username, ask your Company Admin to reset your password.</p>
   <label className="field"><span>Email<em> *</em></span><input type="email" autoComplete="username" required value={email} onChange={e=>setEmail(e.target.value)} disabled={busy||!!sent}/></label>
   {sent&&<p className="auth-notice" role="status">{sent}</p>}{error&&<p role="alert" className="auth-error">{error}</p>}
   {!sent&&<button className="btn primary" disabled={busy}>Send reset link</button>}

@@ -184,7 +184,7 @@ def test_secretaries_and_accountants_can_save_versions(desk, role):
     assert save_revision(api, original, ANNOTATED)["version"] == 2
 
 
-def test_a_client_cannot_save_versions_and_only_sees_shared_ones(desk):
+def test_a_client_only_sees_shared_versions(desk):
     api = desk["api"]
     original = client_upload(desk)
     internal = save_revision(api, original, ANNOTATED)["id"]
@@ -193,13 +193,55 @@ def test_a_client_cannot_save_versions_and_only_sees_shared_ones(desk):
     as_role(api, desk["client"])
     history = versions(api, original)
     assert [v["version"] for v in history["versions"]] == [1, 3]
-    assert history["latest"] == published and history["editable"] is False
+    assert history["latest"] == published
     assert {v["uploadedBy"] for v in history["versions"]} == {"You", "Your company secretary"}
     versions(api, internal, expect=404)
     response = api.request("GET", f"/api/v2-files?id={internal}")
     assert response.status_code == 404
     assert download(api, published) == ANNOTATED + b" final"
-    save_revision(api, published, ANNOTATED + b" client", expect=403)
+
+
+def test_a_client_edits_their_request_document_while_it_awaits_their_answer(desk):
+    api = desk["api"]
+    original = client_upload(desk)
+    as_role(api, desk["client"])
+    assert versions(api, original)["editable"] is True
+    saved = save_revision(api, original, ANNOTATED, note="Corrected the closing balance")
+    as_role(api, "owner")
+    stored = api.get(saved["id"])
+    # Always visible to the client who made it; the original is untouched.
+    assert stored["shared"] is True and stored["uploadedBy"] == desk["client"] and stored["version"] == 2
+    assert download(api, original) == ORIGINAL and api.get(desk["request"])["status"] == "Open"
+
+    # Submitted: the documents are fixed while the secretary reviews them.
+    as_role(api, desk["client"])
+    api.action(desk["request"], "respond", {"response": "Corrected copy attached."})
+    history = versions(api, saved["id"])
+    assert history["editable"] is False and "review" in history["editBlocked"]
+    save_revision(api, saved["id"], ANNOTATED + b" again", expect=400)
+
+    # Returned for correction: editable again.
+    as_role(api, "owner")
+    api.action(desk["request"], "requestDecision", {"status": "Returned", "reason": "Page 2 is missing."})
+    as_role(api, desk["client"])
+    assert save_revision(api, saved["id"], ANNOTATED + b" page 2")["version"] == 3
+
+
+def test_a_client_cannot_edit_documents_outside_their_requests(desk):
+    api = desk["api"]
+    # A document the staff published to the portal library, not sent for a request.
+    library = api.upload(desk["company"], content=ORIGINAL, filename="register.pdf", shared="true")
+    # A document on a request addressed to another client of the same company.
+    second = api.v2({"action": "member", "name": "Second Client", "role": "Client", "companies": [desk["company"]]})["id"]
+    theirs = api.create("request", {"company": desk["company"], "title": "Other request", "due": TOMORROW, "assignee": second})
+    as_role(api, second)
+    their_doc = api.upload(desk["company"], content=ORIGINAL, filename="theirs.pdf", request=theirs)
+
+    as_role(api, desk["client"])
+    history = versions(api, library)
+    assert history["editable"] is False and "your requests" in history["editBlocked"]
+    save_revision(api, library, ANNOTATED, expect=400)
+    save_revision(api, their_doc, ANNOTATED, expect=400)  # visible (shared) but not their request
 
 
 def test_staff_scoped_to_another_company_cannot_reach_the_document(desk):

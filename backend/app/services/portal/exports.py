@@ -8,10 +8,10 @@ import zipfile
 from dataclasses import dataclass
 
 from app.core.container import Services
-from app.core.errors import BadRequest, NotFound
+from app.core.errors import BadRequest, Forbidden, NotFound
 from app.core.jsvalues import now_iso, truthy
 from app.domain.workflow_rules import escape_html
-from app.permissions import Context
+from app.permissions import Context, accessible
 from app.services.portal.common import company
 from app.services.portal.state import portal_state
 from app.storage import tenant_key
@@ -39,7 +39,7 @@ def money_text(paise: int) -> str:
 
 
 def _bundle(services: Services, ctx: Context, c: dict) -> Download:
-    docs = [r for r in ctx.query(kinds=["document"], where={"company": c["id"]}) if truthy(r.get("shared"))]
+    docs = [r for r in ctx.query(kinds=["document"], where={"company": c["id"]}) if truthy(r.get("shared")) and accessible(ctx, r)]
     if not docs:
         raise BadRequest("No published documents are available to download.")
     if len(docs) > MAX_BUNDLE_FILES or sum(r.get("size") or 0 for r in docs) > MAX_BUNDLE_BYTES:
@@ -130,6 +130,8 @@ def portal_export(services: Services, ctx: Context, params: dict) -> Download:
     if mode == "bundle":
         return _bundle(services, ctx, c)
     if mode == "calendar":
+        if not ctx.client_can(c["id"], "calendar"):
+            raise Forbidden("Your role does not permit this action.")
         return _calendar(state, c)
     item_id = params.get("id")
     invoice, payment = None, None

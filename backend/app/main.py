@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api import auth, files, frontend, health, portal, session, workspace
+from app.api import auth, files, frontend, health, portal, session, team, workspace
 from app.core.config import Settings, get_settings
 from app.core.container import Services
 from app.core.csrf import CsrfMiddleware
@@ -90,7 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         log.exception("Unhandled error", extra={"event": "unhandled_error"})
         return JSONResponse(GENERIC_ERROR, status_code=500)
 
-    for router in (health.router, auth.router, workspace.router, files.router, portal.router, session.router, frontend.router):
+    for router in (health.router, auth.router, workspace.router, files.router, portal.router, team.router, session.router, frontend.router):
         app.include_router(router)
     return app
 

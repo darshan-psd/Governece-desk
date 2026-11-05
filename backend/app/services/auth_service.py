@@ -1,8 +1,10 @@
-"""Built-in email + password authentication (``GOVERNANCE_AUTH_MODE=password``).
+"""Built-in password authentication (``GOVERNANCE_AUTH_MODE=password``).
 
-* Sign-in verifies an argon2id hash, checks the user and membership are active, then issues a
-  server-side session (``app.auth.issue_session``). Failures share one generic message and are
-  throttled per account and per client address (database-backed, so it holds across processes).
+* Sign-in takes an email, or the username of an account a Company Admin created (a username can
+  never contain ``@``, so the two cannot collide). It verifies an argon2id hash, checks the user and
+  membership are active, then issues a server-side session (``app.auth.issue_session``). Failures
+  share one generic message and are throttled per account and per client address
+  (database-backed, so it holds across processes).
 * Accounts are created by the Owner from an existing team profile: the invitation stores the
   email and mails a single-use activation link where the person chooses their own password.
   No password is ever generated, sent or stored in plain text.
@@ -37,10 +39,11 @@ from app.services.context import audit_label
 
 log = logging.getLogger("governance.auth")
 
-INVALID_CREDENTIALS = "The email or password is incorrect."
+INVALID_CREDENTIALS = "The username, email or password is incorrect."
 THROTTLED = "Too many sign-in attempts. Wait a few minutes and try again."
 INVALID_LINK = "This link is invalid or has expired. Request a new one."
 _EMAIL = re.compile(r"^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$")
+_USERNAME = re.compile(r"[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]", re.ASCII)
 RESET_REQUESTS_PER_HOUR = 5
 
 
@@ -51,8 +54,23 @@ def normalise_email(value: Any) -> str | None:
     return email if len(email) <= 254 and _EMAIL.match(email) else None
 
 
+def normalise_username(value: Any) -> str | None:
+    """3 to 32 letters, numbers, dots, hyphens or underscores, stored in lower case."""
+    if not isinstance(value, str):
+        return None
+    username = value.strip().lower()
+    return username if _USERNAME.fullmatch(username) else None
+
+
 def _key(scope: str, value: str) -> str:
     return hashlib.sha256(f"{scope}:{value}".encode()).hexdigest()
+
+
+def clear_sign_in_failures(repo: AuthRepository, user: Any) -> None:
+    """A new password gives the account a clean start, under whichever name it signs in with."""
+    for name in (user.email, user.username):
+        if name:
+            repo.clear_failures("account", _key("account", name.lower()))
 
 
 def _require_password_mode(services: Services) -> None:
@@ -83,11 +101,12 @@ class SignInResult:
     organizations: list[dict] = field(default_factory=list)  # set when the user must choose one
 
 
-def sign_in(services: Services, email: Any, password: Any, organization_id: Any, client: str, user_agent: str | None) -> SignInResult:
+def sign_in(services: Services, identifier: Any, password: Any, organization_id: Any, client: str, user_agent: str | None) -> SignInResult:
     _require_password_mode(services)
     settings = services.settings
-    address = normalise_email(email)
-    account_key = _key("account", address or "")
+    address = normalise_email(identifier)
+    username = None if address else normalise_username(identifier)
+    account_key = _key("account", address or username or "")
     client_key = _key("client", client)
     since = iso_in(-settings.governance_login_window_minutes * 60)
     with services.db.read() as session:
@@ -100,9 +119,10 @@ def sign_in(services: Services, email: Any, password: Any, organization_id: Any,
         raise TooManyRequests(THROTTLED)
 
     user = None
-    if address and isinstance(password, str) and 0 < len(password) <= 1024:
+    if (address or username) and isinstance(password, str) and 0 < len(password) <= 1024:
         with services.db.read() as session:
-            user = AuthRepository(session).user_by_email(address)
+            repo = AuthRepository(session)
+            user = repo.user_by_email(address) if address else repo.user_by_username(username)
             stored = user.password_hash if user else None
         valid = verify_password(stored, password)  # runs a full hash even without an account
     else:
@@ -168,7 +188,8 @@ def me(services: Services, ctx: Context, principal: Principal) -> dict:
         user = AuthRepository(session).get_user(ctx.user_id) if ctx.user_id else None
     return {
         "mode": services.settings.governance_auth_mode,
-        "user": {"id": ctx.user_id, "name": ctx.actor.get("name"), "email": user.email if user else None},
+        "user": {"id": ctx.user_id, "name": ctx.actor.get("name"), "email": user.email if user else None,
+                 "username": user.username if user else None},
         "organization": {"id": ctx.owner, "name": organization.name if organization else ctx.owner},
         "membership": {"id": ctx.membership_id, "member": ctx.actor.get("id"), "role": ctx.role},
         "session": {"id": principal.session_id, "method": principal.method},
@@ -201,7 +222,7 @@ def change_password(services: Services, ctx: Context, principal: Principal, curr
         user = AuthRepository(session).get_user(principal.user_id or "")
     if user is None or not isinstance(current, str) or not verify_password(user.password_hash, current):
         raise BadRequest("The current password is incorrect.")
-    validate_password(new, user.email, user.display_name)
+    validate_password(new, user.email or user.username, user.display_name)
     with services.db.write() as session:
         repo = AuthRepository(session)
         repo.set_password(user.id, hash_password(new), must_change_password=False)

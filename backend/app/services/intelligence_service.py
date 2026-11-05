@@ -4,13 +4,14 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
+from sqlalchemy import and_, or_
 
 from app.core.container import Services
 from app.core.errors import BadRequest
-from app.core.jsvalues import js_string, le, lt, now_iso, text, today, truthy
+from app.core.jsvalues import date_valid, js_string, le, lt, now_iso, text, today, truthy
 from app.domain.workflow_rules import SETTLED_STATUSES, csv_cell
 from app.permissions import Context, accessible, authorize
 from app.repositories.identity import IdentityRepository
@@ -18,6 +19,8 @@ from app.repositories.records import AuditRepository, RecordRepository, field
 from app.services.context import audit_label, save, visibility_filters
 
 OPEN_KINDS = ["task", "meeting", "close", "request"]
+# The longest reminder a calendar entry can configure (``calendar_service.REMINDER_DAYS``).
+REMINDER_HORIZON_DAYS = 30
 
 log = logging.getLogger("governance.reminders")
 
@@ -29,15 +32,38 @@ def _t(value) -> str:
 
 # Reminders -------------------------------------------------------------------------------
 
+def _reminder_due(record: dict, day: str, limit: str) -> bool:
+    """Whether ``record`` gets a reminder today.
+
+    Without a ``reminders`` setting (all existing work): every day from three days before the due
+    date, overdue included, as before. A calendar entry created from a template carries its own
+    setting, ``{"days": [7, 3, 1], "overdue": true}``: a reminder on exactly those days before the
+    due date (0 = on the due date), and every day once overdue only when ``overdue`` is set.
+    """
+    config = record.get("reminders")
+    if not isinstance(config, dict):
+        return le(record.get("due"), limit)
+    due = record.get("due")
+    if not date_valid(due):
+        return False
+    remaining = (date.fromisoformat(due) - date.fromisoformat(day)).days
+    if remaining < 0:
+        return config.get("overdue") is True
+    return remaining in [d for d in config.get("days") or [] if isinstance(d, int) and not isinstance(d, bool)]
+
+
 def run_automation(services: Services, owner: str) -> dict:
     """Creates one in-app reminder per due/overdue item per day (idempotent)."""
     day = today()
     limit = (datetime.now(timezone.utc) + timedelta(days=3)).date().isoformat()
+    horizon = (datetime.now(timezone.utc) + timedelta(days=REMINDER_HORIZON_DAYS)).date().isoformat()
     with services.db.read() as session:
         repo = RecordRepository(session, owner)
-        # SQLite narrows to work items due within three days; the exact rule is re-applied below.
-        candidates = repo.find(kinds=OPEN_KINDS, extra=[field("due") <= limit])
-        open_items = [r for r in candidates if r.get("status") not in SETTLED_STATUSES and le(r.get("due"), limit)]
+        # The database narrows to work due within three days, or within the longest configurable
+        # reminder for work that has its own reminder setting; the exact rule is re-applied below.
+        window = or_(field("due") <= limit, and_(field("due") <= horizon, field("reminders").is_not(None)))
+        candidates = repo.find(kinds=OPEN_KINDS, extra=[window])
+        open_items = [r for r in candidates if r.get("status") not in SETTLED_STATUSES and _reminder_due(r, day, limit)]
         notified = repo.get_many(f"notice-{r.get('id')}-{day}" for r in open_items)
     due = [r for r in open_items if f"notice-{r.get('id')}-{day}" not in notified]
     if due:
@@ -175,10 +201,12 @@ def briefing(services: Services, ctx: Context, body: dict) -> dict:
 
 # Reports ---------------------------------------------------------------------------------
 
-def report_csv(ctx: Context) -> str:
+def report_csv(ctx: Context, company: str | None = None) -> str:
+    """Work report as CSV. ``company`` (optional, the Reports page's company filter) limits it to one
+    company; access rules apply either way, so a company the actor cannot see yields no rows."""
     authorize(ctx, ["Owner", "Secretary", "Accountant", "Director", "Auditor"])
     candidates = ctx.query(kinds=["task", "meeting", "close", "event", "request", "submission"], **visibility_filters(ctx))
-    rows = [r for r in candidates if accessible(ctx, r)]
+    rows = [r for r in candidates if accessible(ctx, r) and (not company or r.get("company") == company)]
     names = {i: r.get("name") for i, r in ctx.find_many(r.get("company") for r in rows).items()}
     table = [["Title", "Type", "Company", "Due", "Status", "Priority"]] + [
         [r.get("title"), r.get("kind"), names.get(r.get("company")), r.get("due"), r.get("status"), r.get("priority")] for r in rows

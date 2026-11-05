@@ -9,8 +9,9 @@ from datetime import datetime, timedelta, timezone
 
 from app.core.jsvalues import gt, le, today, truthy
 from app.domain.portal_domain import ACT_SOURCE, DOCUMENT_CATEGORIES, INCORPORATION_SOURCE
+from app.domain.client_access import EMPLOYEE_MODULES
 from app.domain.workflow_rules import CANCELLED, can_access
-from app.permissions import CLIENT_HIDDEN_COMPANY_FIELDS, Context, client_safe
+from app.permissions import Context, client_may_read_document, client_safe
 from app.services.portal.common import STAFF
 from app.services.portal.onboarding import PUBLISHABLE_WORK
 from app.services.portal.tracker import work_items
@@ -18,6 +19,24 @@ from app.services.portal.tracker import work_items
 PORTAL_KINDS = ["document", "invoice", "portalobligation", "onboarding", "thread", "request", "task"]
 # Above this many ids an IN (...) filter costs more than filtering the kind in Python.
 MAX_IN_FILTER = 500
+# The portal module a Client needs for each kind of record, checked per company.
+MODULE_OF_KIND = {"invoice": "invoices", "portalobligation": "calendar", "onboarding": "onboarding", "thread": "inbox"}
+# Firm staff who manage a client company's team in the portal (see ``team_service``).
+TEAM_MANAGERS = ("Owner", "Secretary")
+
+
+def portal_permissions(ctx: Context, company_id: str) -> dict:
+    """What the portal may offer this person for one company. Display only: every action is also
+    checked on the server."""
+    if ctx.role == "Client":
+        grant = ctx.client_access.get(company_id)
+        return {"role": grant.role if grant else None, "permissions": sorted(grant.permissions) if grant else []}
+    permissions = {*EMPLOYEE_MODULES}
+    if ctx.role in STAFF:
+        permissions |= {"profile.edit", "documents.upload"}
+    if ctx.role in TEAM_MANAGERS:
+        permissions.add("team")
+    return {"role": None, "permissions": sorted(permissions)}
 
 
 def _invoice_visible(ctx: Context, r: dict) -> bool:
@@ -41,18 +60,18 @@ def portal_state(ctx: Context, only_company: str | None = None) -> dict:
     else:
         company_ids = scope  # None: every company
     candidates = ctx.query(kinds=["company"], **({"ids": company_ids} if company_ids is not None else {}))
-    companies = [
-        {k: v for k, v in r.items() if k not in CLIENT_HIDDEN_COMPANY_FIELDS} if is_client else r
-        for r in candidates if can_access(ctx.actor, r)
-    ]
+    companies = [client_safe(ctx, r) for r in candidates if can_access(ctx.actor, r)]
     ids = {c["id"] for c in companies}
     in_scope = lambda r: r.get("company") in ids  # noqa: E731
     related = [r for r in ctx.query(kinds=PORTAL_KINDS, **_company_filter(ids, company_ids is not None)) if in_scope(r)]
     by_kind: dict[str, list[dict]] = {kind: [] for kind in PORTAL_KINDS}
     for r in related:
-        by_kind[r["kind"]].append(r)
+        module = MODULE_OF_KIND.get(r["kind"])
+        if module is None or ctx.client_can(r.get("company"), module):
+            by_kind[r["kind"]].append(r)
 
-    documents = [{k: v for k, v in r.items() if k != "key"} for r in by_kind["document"] if truthy(r.get("shared")) or not is_client]
+    documents = [{k: v for k, v in r.items() if k != "key"} for r in by_kind["document"]
+                 if not is_client or (truthy(r.get("shared")) and client_may_read_document(ctx, r))]
     visible_invoices = [r for r in by_kind["invoice"] if _invoice_visible(ctx, r)]
     invoice_ids = {r["id"] for r in visible_invoices}
     payment_filter = {"where": {"invoice": sorted(invoice_ids)}} if len(invoice_ids) <= MAX_IN_FILTER else {}
@@ -127,6 +146,7 @@ def portal_state(ctx: Context, only_company: str | None = None) -> dict:
         "calendar": due,
         "documentCategories": DOCUMENT_CATEGORIES,
         "staff": ctx.role in STAFF,
+        "access": {c["id"]: portal_permissions(ctx, c["id"]) for c in companies},
         "today": today(),
         "sources": {"incorporation": INCORPORATION_SOURCE, "annual": ACT_SOURCE},
         # Staff only: internal work a secretary may publish to this client's calendar. Clients
@@ -139,5 +159,6 @@ def portal_state(ctx: Context, only_company: str | None = None) -> dict:
     }
     # Client-facing work tracker, derived from the authorised data above (no extra queries, no
     # new access path). ``internalTasks`` is not one of its sources.
-    state["work"] = work_items(state, mirrored=mirrored)
+    # The Requests page reads its rows from here, so requests stay without the tracker module.
+    state["work"] = [w for w in work_items(state, mirrored=mirrored) if w["source"] == "request" or ctx.client_can(w["company"], "tracker")]
     return state

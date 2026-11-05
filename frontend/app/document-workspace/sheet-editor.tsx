@@ -101,9 +101,10 @@ function explicitFormulas(wb: XWorkbook) {
 }
 
 type Sel = { r: number; c: number };
-type Props = { bytes: ArrayBuffer; name: string; kind: 'xlsx' | 'csv'; editable: boolean; onDirty: (dirty: boolean) => void; register: (api: ViewerApi | null) => void };
+// draftBytes: an auto-saved draft of this workbook (always XLSX, so formatting survives even for CSV).
+type Props = { bytes: ArrayBuffer; draftBytes?: ArrayBuffer; name: string; kind: 'xlsx' | 'csv'; editable: boolean; onDirty: (dirty: boolean) => void; register: (api: ViewerApi | null) => void };
 
-export default function SheetEditor({ bytes, name, kind, editable, onDirty, register }: Props) {
+export default function SheetEditor({ bytes, draftBytes, name, kind, editable, onDirty, register }: Props) {
     const [wb, setWb] = useState<XWorkbook | null>(null), [error, setError] = useState(''), [sheet, setSheet] = useState(0), [tick, setTick] = useState(0);
     const [sel, setSel] = useState<Sel>({ r: 1, c: 1 }), [anchor, setAnchor] = useState<Sel>({ r: 1, c: 1 }), [editing, setEditing] = useState<{ text: string; bar: boolean } | null>(null);
     const [view, setView] = useState({ top: 0, left: 0, w: 800, h: 400 }), [resizing, setResizing] = useState<{ c: number; px: number } | null>(null);
@@ -116,7 +117,8 @@ export default function SheetEditor({ bytes, name, kind, editable, onDirty, regi
         (async () => {
             try {
                 const mod: any = await import('exceljs'), ExcelJS = mod.default ?? mod, book = new ExcelJS.Workbook();
-                if (kind === 'xlsx') { await book.xlsx.load(bytes.slice(0)); explicitFormulas(book); setLosses(workbookLosses(new Uint8Array(bytes))) }
+                if (draftBytes) { await book.xlsx.load(draftBytes.slice(0)); explicitFormulas(book); if (kind === 'xlsx') setLosses(workbookLosses(new Uint8Array(bytes))) }
+                else if (kind === 'xlsx') { await book.xlsx.load(bytes.slice(0)); explicitFormulas(book); setLosses(workbookLosses(new Uint8Array(bytes))) }
                 else {
                     const sheetCsv = book.addWorksheet('Sheet1'), rows = parseCsv(new TextDecoder().decode(bytes).replace(/^\uFEFF/, ''));
                     rows.forEach((row, i) => row.forEach((v, j) => { if (v !== '') sheetCsv.getCell(i + 1, j + 1).value = NUMERIC.test(v) && v.length < 16 ? Number(v) : v }));
@@ -126,7 +128,7 @@ export default function SheetEditor({ bytes, name, kind, editable, onDirty, regi
             } catch (e: any) { if (!gone) setError('This workbook could not be opened in the browser editor: ' + (e?.message || 'unknown error') + '. Download it to open it in Excel.') }
         })();
         return () => { gone = true };
-    }, [bytes, kind]);
+    }, [bytes, draftBytes, kind]);
 
     // Grid geometry ----------------------------------------------------------------------------
     const rowCount = ws ? Math.min(1048576, Math.max(ws.rowCount + 30, 100)) : 0, colCount = ws ? Math.min(16384, Math.max(ws.columnCount + 6, 26)) : 0;
@@ -289,7 +291,7 @@ export default function SheetEditor({ bytes, name, kind, editable, onDirty, regi
     }
     useEffect(() => {
         if (!wb) return;
-        register({ exportFile: async () => kind === 'xlsx' ? xlsxBytes() : csvBytes() });
+        register({ exportFile: async () => kind === 'xlsx' ? xlsxBytes() : csvBytes(), draft: async () => { const b = await xlsxBytes(); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) } });
         return () => register(null);
     }, [wb, kind]);
 
