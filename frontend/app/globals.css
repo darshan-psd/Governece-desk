@@ -386,3 +386,12 @@ h1{letter-spacing:-.5px}
 .auth-form .btn.primary{box-shadow:0 1px 2px #b0292033,0 8px 18px -8px #b0292080}
 .portal-brand>.brand-caption,.auth-poster-brand>.brand-caption{display:block;margin-top:10px;font-size:8.5px;font-weight:700;letter-spacing:2px;color:var(--accent)}
 h1,h2{font-family:var(--serif)}
+/* Pagination */
+.inbox-bar{display:flex;align-items:center;gap:12px;padding:0 24px 14px}
+.pager{display:flex;align-items:center;gap:16px;flex-wrap:wrap;border-top:1px solid var(--line);padding:14px 24px;font-size:12px;color:var(--muted)}
+.pager-count{margin-right:auto}
+.pager-size{display:flex;align-items:center;gap:8px}.pager-size select{min-height:32px;padding:4px 8px;font-size:12px}
+.pager-pages{display:flex;align-items:center;gap:4px}.pager-pages .icon-btn{margin-left:0;height:32px;min-width:32px}
+.pager-page{min-width:32px;height:32px;border-radius:7px;font-size:12px;color:var(--ink)}.pager-page:hover{background:var(--soft)}.pager-page.on{background:var(--accent);color:#fff;font-weight:650}
+.pager-gap{padding:0 4px}
+@media(max-width:680px){.pager{padding:12px 16px}.pager-count{width:100%}.inbox-bar{padding:0 16px 12px}}

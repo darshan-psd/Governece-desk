@@ -48,8 +48,9 @@ const DEV_PORT = Number(process.env.DEV_PORT || 8005);
 
 // The leading dot allows the domain and all its subdomains, so it survives EC2 hostname changes.
 
-const ALLOWED_HOSTS = ['.compute.amazonaws.com', 'localhost', '127.0.0.1'];
- 
+
+const ALLOWED_HOSTS = ['.compute.amazonaws.com', '.xberratagger.com.sg', 'localhost', '127.0.0.1'];
+
 // app.core.security.LocalSecurityMiddleware rejects an unrecognised Host (DNS-rebinding guard) and
 
 // any cross-site Origin. changeOrigin rewrites Host to the backend's; Origin is rewritten here, so
