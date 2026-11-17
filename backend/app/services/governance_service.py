@@ -82,7 +82,7 @@ def pack_html(ctx: Context, pack_id: str) -> str:
         for d in snapshot.get("documents") or []
     )
     return (
-        f'<!doctype html><html><head><meta charset="utf-8"><title>{e(record.get("title"))}</title><style>body{{font:15px/1.6 system-ui;max-width:900px;margin:48px auto;color:#173044}}h1{{font-size:30px}}h2{{margin-top:30px}}pre{{white-space:pre-wrap;font:inherit}}table{{border-collapse:collapse;width:100%}}td,th{{padding:10px;border:1px solid #ddd;text-align:left}}small{{color:#607789}}@media print{{body{{margin:15mm}}}}</style></head><body>'
+        f'<!doctype html><html><head><meta charset="utf-8"><title>{e(record.get("title"))}</title><style>body{{font:15px/1.6 system-ui;max-width:900px;margin:48px auto;color:#14193a;border-top:6px solid #04143f;padding-top:24px}}h1{{font-size:30px;font-family:Georgia,Times New Roman,serif}}h2{{margin-top:30px;color:#04143f;font-family:Georgia,Times New Roman,serif}}pre{{white-space:pre-wrap;font:inherit}}table{{border-collapse:collapse;width:100%}}td,th{{padding:10px;border:1px solid #dde2ed;text-align:left}}th{{background:#f6f7fb;color:#1f2853}}small{{color:#b02920;font-weight:700;letter-spacing:1.5px}}@media print{{body{{margin:15mm}}}}</style></head><body>'
         f"<small>GOVERNANCE DESK · CONTROLLED SNAPSHOT</small><h1>{e(r.get('title'))}</h1>"
         f"<p>{e(company.get('name'))} · {e(r.get('due'))} · {e(r.get('status'))}</p>"
         f"<p>Prepared by {e(snapshot.get('preparedBy'))} at {e(snapshot.get('created'))}. Source revision {r.get('revision')}.</p>"

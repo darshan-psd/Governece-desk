@@ -2,7 +2,7 @@
 import {useEffect,useState} from 'react';
 // Production bundles only the lucide icons workspace-next.tsx imports (scripts/build-frontend.mjs);
 // every icon used here is in that list. Icons outside it are drawn below with Lucide's own paths.
-import {ShieldCheck,CalendarDays,Files,Check} from 'lucide-react';
+import {CalendarDays,Files,Check} from 'lucide-react';
 import Workspace from './workspace-next';
 
 // Sign-in screens for GOVERNANCE_AUTH_MODE=password. In local-preview mode the workspace opens directly.
@@ -46,15 +46,15 @@ const FEATURES=[
 function AuthPoster(){
  return <aside className="auth-poster" aria-label="About Governance Desk">
   <svg className="auth-poster-art" viewBox="0 0 800 900" preserveAspectRatio="xMidYMid slice" aria-hidden="true" focusable="false">
-   <circle cx="742" cy="96" r="168" fill="none" stroke="#087f78" strokeOpacity=".1" strokeWidth="1.5"/>
-   <circle cx="742" cy="96" r="238" fill="none" stroke="#087f78" strokeOpacity=".06"/>
+   <circle cx="742" cy="96" r="168" fill="none" stroke="#1f2853" strokeOpacity=".1" strokeWidth="1.5"/>
+   <circle cx="742" cy="96" r="238" fill="none" stroke="#1f2853" strokeOpacity=".06"/>
    <path d="M800 0v330c-92 18-170-36-214-118S470 52 446 0z" fill="#fff" fillOpacity=".5"/>
-   <path d="M0 650c140-58 268 22 410-6s250-150 390-120v376H0z" fill="#0f8a80" fillOpacity=".05"/>
-   <path d="M0 742c170-64 300 26 452-10s238-120 348-92v260H0z" fill="#0f8a80" fillOpacity=".06"/>
+   <path d="M0 650c140-58 268 22 410-6s250-150 390-120v376H0z" fill="#1f2853" fillOpacity=".05"/>
+   <path d="M0 742c170-64 300 26 452-10s238-120 348-92v260H0z" fill="#1f2853" fillOpacity=".06"/>
    <path d="M0 824c190-40 340 30 500 0s220-60 300-40v116H0z" fill="#fff" fillOpacity=".45"/>
-   <rect x="672" y="318" width="56" height="56" rx="12" transform="rotate(16 700 346)" fill="none" stroke="#087f78" strokeOpacity=".08"/>
+   <rect x="672" y="318" width="56" height="56" rx="12" transform="rotate(16 700 346)" fill="none" stroke="#1f2853" strokeOpacity=".08"/>
   </svg>
-  <div className="auth-poster-brand"><span aria-hidden="true"><ShieldCheck size={24}/></span><div>Governance Desk<small>CLIENT SERVICES · INDIA</small></div></div>
+  <div className="auth-poster-brand"><span className="brand-logo" role="img" aria-label="Xberra Tagger"/><small className="brand-caption">CLIENT SERVICES · INDIA</small></div>
   <div className="auth-poster-body">
    <h2 className="auth-poster-title">Simplifying <span>Compliance</span> <br/>for Growing Businesses</h2>
    <p className="auth-poster-lead">Manage your company’s statutory filings, deadlines, documents and communications — all in one place.</p>
@@ -133,7 +133,7 @@ export default function AuthGate(){
   window.addEventListener('governance:session-expired',onExpired);return()=>window.removeEventListener('governance:session-expired',onExpired)},[]);
  if(screen.kind==='workspace')return <Workspace/>;
  if(screen.kind==='loading')return <div className="auth-loading"><div className="auth-card"><p className="muted">Opening Governance Desk…</p></div></div>;
- return <div className="auth-screen"><AuthPoster/><main className="auth-panel"><div className="auth-card"><div className="auth-brand"><span aria-hidden="true"><ShieldCheck size={18}/></span>Governance<em>DESK</em></div>
+ return <div className="auth-screen"><AuthPoster/><main className="auth-panel"><div className="auth-card"><div className="auth-brand"><span className="brand-logo" role="img" aria-label="Xberra Tagger"/></div>
   {screen.kind==='error'&&<p role="alert" className="auth-error">{screen.message}</p>}
   {screen.kind==='signin'&&<SignIn notice={screen.message} onForgot={()=>setScreen({kind:'forgot'})} onDone={afterSignedIn}/>}
   {screen.kind==='forgot'&&<Forgot onBack={()=>setScreen({kind:'signin'})}/>}
