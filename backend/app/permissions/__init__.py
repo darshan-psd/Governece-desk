@@ -178,8 +178,13 @@ def client_may_read_document(ctx: Context, record: dict) -> bool:
 
 
 def accessible(ctx: Context, record: dict) -> bool:
-    """Whether the acting profile may see ``record`` (company scope + client restrictions)."""
-    if not can_access(ctx.actor, record):
+    """Whether the acting profile may see ``record`` (company scope + client restrictions).
+
+    A briefing across companies has no company of its own (``company`` is empty): it is visible
+    to whoever can see every one of its sources, which the source check below enforces.
+    """
+    across_companies = record.get("kind") == "briefing" and not record.get("company")
+    if not across_companies and not can_access(ctx.actor, record):
         return False
     if record.get("kind") == "briefing":
         for source in record.get("sources") or []:

@@ -300,6 +300,11 @@ def test_module_forms_edits_and_actions(page):
     # Briefings, reminders and report export.
     nav(page, "Briefings")
     page.get_by_role("button", name="Generate local briefing").click()
+    # The new briefing opens straight away, with its text and a download link.
+    dialog = page.get_by_role("dialog")
+    expect(dialog.locator(".briefing-text")).to_contain_text("WORKSPACE BRIEFING —")
+    expect(dialog.get_by_role("link", name="Download (.txt)")).to_be_visible()
+    page.keyboard.press("Escape")
     expect(page.locator("main").get_by_text("Workspace briefing").filter(visible=True).first).to_be_visible()
     nav(page, "Inbox")
     page.get_by_role("button", name="Check reminders now").click()

@@ -11,7 +11,7 @@ from app.permissions import accessible, client_safe
 from app.repositories.records import RecordRepository
 from app.services.context import load_context
 from app.services.portal.state import portal_state
-from app.services.records_service import read_state, read_state_json
+from app.services.records_service import read_state, read_state_json, state_view
 
 WS = "local-preview"
 
@@ -65,7 +65,8 @@ def reference_state(services, ctx) -> list[dict]:
     """The original algorithm: load everything, filter in Python."""
     with services.db.read() as session:
         everything = RecordRepository(session, WS).all()
-    return [client_safe(ctx, {k: v for k, v in r.items() if k != "key"}) for r in everything if accessible(ctx, r) and r.get("kind") != "member"]
+    return [client_safe(ctx, state_view({k: v for k, v in r.items() if k != "key"}))
+            for r in everything if accessible(ctx, r) and r.get("kind") != "member"]
 
 
 @pytest.mark.parametrize("actor", ["owner", "secretary", "scoped", "client"])

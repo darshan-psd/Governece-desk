@@ -99,7 +99,8 @@ def validate_record(kind: Any, data: Any) -> dict:
     if kind in ("task", "close"):
         return {
             **common,
-            "category": text(data.get("category")) or "Compliance",
+            # A financial close has no category of its own to choose.
+            "category": "Financial close" if kind == "close" else text(data.get("category")) or "Compliance",
             "checklist": clean_checklist(data.get("checklist")),
             "dependencies": _strings(data.get("dependencies")),
             "evidence": _strings(data.get("evidence")),

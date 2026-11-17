@@ -72,7 +72,11 @@ def visibility_filters(ctx: Context) -> dict:
     in_companies = select(ROWID).where(Record.owner == ctx.owner, json_field("company").in_(scope))
     if ctx.role == "Client":
         in_companies = in_companies.where(Record.kind.in_(["request", "document"]))
-    return {"extra": [ROWID.in_(union_all(own_companies, in_companies))], "rowid_driven": True}
+        return {"extra": [ROWID.in_(union_all(own_companies, in_companies))], "rowid_driven": True}
+    # A briefing across companies has no company of its own: ``accessible()`` admits it when every
+    # one of its sources is in scope.
+    across_companies = select(ROWID).where(Record.owner == ctx.owner, Record.kind == "briefing", json_field("company") == "")
+    return {"extra": [ROWID.in_(union_all(own_companies, in_companies, across_companies))], "rowid_driven": True}
 
 
 def audit_label(ctx: Context, action: str) -> str:

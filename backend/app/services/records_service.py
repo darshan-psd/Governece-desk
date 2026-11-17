@@ -117,8 +117,21 @@ def read_state(services: Services, ctx: Context) -> dict:
     """
     candidates = ctx.query(exclude_kinds=["member"], **visibility_filters(ctx))
     prefetch_briefing_sources(ctx, candidates)
-    records = [client_safe(ctx, {k: v for k, v in r.items() if k != "key"}) for r in candidates if accessible(ctx, r)]
+    records = [client_safe(ctx, state_view({k: v for k, v in r.items() if k != "key"})) for r in candidates if accessible(ctx, r)]
     return {"records": records, **_state_meta(services, ctx)}
+
+
+# A briefing's text and source list can be large; the workspace state carries a summary and the
+# app fetches the rest when one is opened (``GET /api/v2/briefing``).
+BRIEFING_DETAIL = ("content", "sources", "fingerprint")
+
+
+def state_view(record: dict) -> dict:
+    """A record as the workspace state carries it: a briefing without its text and source list."""
+    if record.get("kind") != "briefing":
+        return record
+    sources = record.get("sources")
+    return {**{k: v for k, v in record.items() if k not in BRIEFING_DETAIL}, "sourceCount": len(sources) if isinstance(sources, list) else 0}
 
 
 def _json(value) -> str:
@@ -139,7 +152,8 @@ def read_state_json(services: Services, ctx: Context) -> bytes:
     rows = ctx.store.json_rows(exclude_kinds=["member"])
     briefings = {record_id: json.loads(text) for kind, record_id, text in rows if kind == "briefing"}
     prefetch_briefing_sources(ctx, briefings.values())
-    parts = [text for kind, record_id, text in rows if kind != "briefing" or accessible(ctx, briefings[record_id])]
+    parts = [text if kind != "briefing" else _json(state_view(briefings[record_id]))
+             for kind, record_id, text in rows if kind != "briefing" or accessible(ctx, briefings[record_id])]
     meta = _json(_state_meta(services, ctx))
     return ('{"records":[' + ",".join(parts) + "]," + meta[1:]).encode()
 
@@ -205,7 +219,7 @@ def list_records(services: Services, ctx: Context, query: RecordQuery) -> dict:
             order_by = (column.desc() if query.order == "desc" else column.asc(), *ORDER)
     rows = ctx.query(order_by=order_by, limit=query.limit, offset=query.offset, **criteria)
     prefetch_briefing_sources(ctx, rows)
-    items = [client_safe(ctx, {k: v for k, v in r.items() if k != "key"}) for r in rows if accessible(ctx, r)]
+    items = [client_safe(ctx, state_view({k: v for k, v in r.items() if k != "key"})) for r in rows if accessible(ctx, r)]
     return {"items": items, "total": ctx.store.count(**criteria), "limit": query.limit, "offset": query.offset}
 
 

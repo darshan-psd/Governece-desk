@@ -271,7 +271,7 @@ def test_reminders_briefings_providers_and_exports(workspace):
     api.v2({"action": "automation"})
     assert api.v2({"action": "automation"})["count"] == 0  # one reminder per item per day
     briefing = api.v2({"action": "briefing"})
-    assert api.get(briefing["id"])["sources"]
+    assert api.call(f"/api/v2/briefing?id={briefing['id']}")["sources"]
     api.v2({"action": "briefing", "ai": True}, 400)  # AI not configured
     notice = next(r for r in api.state()["records"] if r["kind"] == "notification")
     api.action(notice["id"], "dispatchEmail", {"to": "nobody@example.invalid"}, 400)  # email not configured

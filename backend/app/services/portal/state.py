@@ -95,7 +95,9 @@ def portal_state(ctx: Context, only_company: str | None = None) -> dict:
     mirrored: dict[str, dict] = {}
     for r in by_kind["portalobligation"]:
         source = ctx.find(r.get("sourceTask")) if r.get("sourceTask") is not None else None
-        status = ("Review required" if truthy(source.get("reviewRequired")) else source.get("status")) if source else r.get("status")
+        # Cancelled work stays "Cancelled" even if an older version of the app flagged it for review.
+        flagged = source is not None and truthy(source.get("reviewRequired")) and source.get("status") != CANCELLED
+        status = ("Review required" if flagged else source.get("status")) if source else r.get("status")
         obligations.append({**r, "status": status, "due": (source or {}).get("due") or r.get("due")})
         if source is not None:
             mirrored[r["id"]] = {key: source.get(key) for key in ("created", "completedAt", "cancelledAt")}

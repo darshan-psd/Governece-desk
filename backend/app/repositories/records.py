@@ -242,25 +242,41 @@ class RecordRepository:
         return result.rowcount == 1
 
     def patch_where(self, kinds: Iterable[str], patch: dict, *, where: dict[str, Any] | None = None,
-                    evidence_contains: str | None = None) -> int:
+                    evidence_contains: str | None = None, skip_statuses: Iterable[str] = ()) -> int:
         """Merges ``patch`` into every matching record (revision + 1, ``updated`` unchanged).
 
         Mirrors the Node backend's ``json_set`` bulk updates. Matching happens in the database.
         The rows are locked while they are rewritten (``FOR UPDATE`` on PostgreSQL; SQLite's writer
         lock already serialises writes), so a concurrent edit is never overwritten: it either commits
         first and is merged into, or waits and then fails its revision check (409).
+
+        Records whose ``status`` is in ``skip_statuses`` are left untouched. Returns how many
+        records were changed.
         """
         extra = [evidence_sql(evidence_contains, name_of(self.session))] if evidence_contains is not None else []
         rows = self.session.execute(select(Record.id, Record.data, Record.revision).where(
             and_(*self._conditions(kinds=kinds, where=where, extra=extra))).with_for_update()).all()
+        skip = set(skip_statuses)
+        changed = 0
         for record_id, data, revision in rows:
             merged = json.loads(data)
+            if skip and merged.get("status") in skip:
+                continue
             merged.update(patch)
             self.session.execute(
                 update(Record).where(Record.owner == self.owner, Record.id == record_id)
                 .values(data=dumps(merged), revision=revision + 1).execution_options(synchronize_session=False)
             )
-        return len(rows)
+            changed += 1
+        return changed
+
+    def lock(self, record_id: str) -> None:
+        """Holds a row lock on one record until the transaction ends (``FOR UPDATE`` on PostgreSQL).
+
+        Used to serialise decisions that read "the latest" of several rows and then insert a new
+        one. On SQLite the writer lock already serialises every write transaction.
+        """
+        self.session.execute(select(Record.id).where(Record.owner == self.owner, Record.id == record_id).with_for_update())
 
 
 def evidence_sql(document_id: str, dialect: str = "sqlite") -> ColumnElement:

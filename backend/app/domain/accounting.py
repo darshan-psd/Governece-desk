@@ -42,7 +42,7 @@ def _rows(content: str) -> list[list[str]]:
 
 
 def _amount(value: str | None, line: int) -> int:
-    value = (value or "0").strip()
+    value = (value or "").strip() or "0"  # an empty or whitespace-only cell is a zero amount
     if not re.fullmatch(r"\d+(\.\d{1,2})?", value, re.ASCII):
         raise BadRequest(f"Invalid amount on row {line}. Use positive amounts with up to two decimals.")
     whole, _, decimal = value.partition(".")
@@ -76,4 +76,6 @@ def parse_trial_balance(content: str) -> dict:
     credit = sum(e["credit"] for e in entries)
     if debit > MAX_SAFE_INTEGER or credit > MAX_SAFE_INTEGER:
         raise BadRequest("Total exceeds supported range.")
+    if debit == 0 and credit == 0:
+        raise BadRequest("Every amount in the file is zero. Check the file before importing.")
     return {"entries": entries, "debit": debit, "credit": credit, "difference": debit - credit, "balanced": debit == credit}

@@ -15,7 +15,7 @@ from app.core.errors import BadRequest, Conflict, Forbidden, NotFound
 from app.core.jsvalues import as_list, now_iso, text, truthy
 from app.domain.accounting import parse_trial_balance
 from app.domain.portal_domain import DOCUMENT_CATEGORIES
-from app.domain.workflow_rules import EDIT_ROLES
+from app.domain.workflow_rules import CANCELLED, EDIT_ROLES
 from app.permissions import Context, accessible, authorize
 from app.repositories.records import AuditRepository, RecordRepository
 from app.services.context import audit_label, save
@@ -26,6 +26,7 @@ MAX_IMPORT_BYTES = 1024 * 1024
 ALLOWED_EXTENSIONS = ("pdf", "txt", "csv", "xlsx", "docx")
 CURRENCIES = ("INR", "GBP", "USD", "SGD", "EUR", "AUD")
 REVIEW_ON_NEW_VERSION = ("task", "meeting", "close", "event", "submission")
+DUPLICATE_IMPORT = "This file has already been imported for this company, period and currency."
 # An information request takes documents while the client still owes an answer: the same statuses
 # in which ``governance_service.respond`` accepts one.
 ANSWERABLE_REQUEST = ("Open", "Returned")
@@ -146,7 +147,8 @@ def upload_document(services: Services, ctx: Context, form: dict, file: Incoming
             if parent:
                 # Work approved against the old version must be reviewed again.
                 # Evidence always belongs to the record's own company (enforced when it is linked).
-                repo.patch_where(REVIEW_ON_NEW_VERSION, {"reviewRequired": True}, where={"company": company}, evidence_contains=parent["id"])
+                repo.patch_where(REVIEW_ON_NEW_VERSION, {"reviewRequired": True}, where={"company": company}, evidence_contains=parent["id"],
+                                 skip_statuses=(CANCELLED,))
     except BaseException:
         services.storage.delete(key)
         raise
@@ -307,7 +309,8 @@ def save_revision(services: Services, ctx: Context, form: dict, file: IncomingFi
                 raise Conflict("This document changed. Reload it before saving.")
             repo.insert(document_id, "document", data)
             AuditRepository.of(session, ctx).add(audit_label(ctx, f"Saved edited version {data['version']}"), parent.get("name"))
-            repo.patch_where(REVIEW_ON_NEW_VERSION, {"reviewRequired": True}, where={"company": company}, evidence_contains=parent["id"])
+            repo.patch_where(REVIEW_ON_NEW_VERSION, {"reviewRequired": True}, where={"company": company}, evidence_contains=parent["id"],
+                             skip_statuses=(CANCELLED,))
     except BaseException:
         services.storage.delete(key)
         raise
@@ -329,34 +332,50 @@ def import_trial_balance(services: Services, ctx: Context, form: dict, file: Inc
         raise Forbidden("Company access required.")
     if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period, re.ASCII) or currency not in CURRENCIES:
         raise BadRequest("Choose a valid period and currency.")
-    if file is None or not file.name.endswith(".csv") or file.size > MAX_IMPORT_BYTES:
-        raise BadRequest("Choose a CSV file up to 1 MB.")
-    parsed = parse_trial_balance(file.content.decode("utf-8", errors="replace").removeprefix("﻿"))
+    if file is None or not file.name.lower().endswith(".csv"):
+        raise BadRequest("Choose a .csv file.")
+    if file.size > MAX_IMPORT_BYTES:
+        raise BadRequest("The CSV file is larger than 1 MB.")
+    try:
+        content = file.content.decode("utf-8")
+    except UnicodeDecodeError:
+        # Decoding with replacement characters would store garbled account names without a word.
+        raise BadRequest("The file is not UTF-8 text. In Excel use Save As → “CSV UTF-8”, then import again.") from None
+    parsed = parse_trial_balance(content.removeprefix("﻿"))
     if not parsed["balanced"]:
         raise BadRequest(f"Debits and credits differ by {parsed['difference'] / 100:.2f} {currency}. Correct the file before importing.")
     digest = hashlib.sha256(file.content).hexdigest()
-    # Newest first, so the first match is the latest import (same tie order as before).
-    same_period = ctx.query(kinds=["trialbalance"], where={"company": company, "period": period, "currency": currency})
-    if any(r.get("hash") == digest for r in same_period):
-        raise BadRequest("This file has already been imported for this company, period and currency.")
-    previous = same_period[0] if same_period else None
+    filters = {"kinds": ["trialbalance"], "where": {"company": company, "period": period, "currency": currency}}
+    # Early answer for an obvious duplicate, before the file is stored. It is checked again below.
+    if any(r.get("hash") == digest for r in ctx.query(**filters)):
+        raise BadRequest(DUPLICATE_IMPORT)
 
     import_id = str(uuid.uuid4())
     key = f"{ctx.owner}/{import_id}"
     services.storage.put(key, file.content)
-    data = {
-        "title": file.name, "company": company, "period": period, "currency": currency, **parsed, "key": key, "hash": digest,
-        "importedBy": ctx.actor["id"], "previousImport": previous["id"] if previous else None,
-        "version": ((previous or {}).get("version") or 0) + 1, "status": "Review required",
-    }
     try:
         with services.db.write() as session:
             repo = RecordRepository(session, ctx.owner)
+            # Imports for one company take turns, and the latest version is read inside this
+            # transaction: two files imported at the same moment become versions 2 and 3, never
+            # two competing "version 2"s.
+            repo.lock(company)
+            same_period = repo.find(**filters)  # newest first: the first match is the latest import
+            if any(r.get("hash") == digest for r in same_period):
+                raise BadRequest(DUPLICATE_IMPORT)
+            previous = same_period[0] if same_period else None
+            data = {
+                "title": file.name, "company": company, "period": period, "currency": currency, **parsed, "key": key, "hash": digest,
+                "importedBy": ctx.actor["id"], "previousImport": previous["id"] if previous else None,
+                "version": ((previous or {}).get("version") or 0) + 1, "status": "Review required",
+            }
             repo.insert(import_id, "trialbalance", data)
             AuditRepository.of(session, ctx).add(audit_label(ctx, "Imported trial balance"), file.name)
             if previous:
-                # A close linked to the previous import must be reviewed against the new version.
-                repo.patch_where(("close",), {"reviewRequired": True}, where={"company": company, "trialbalance": previous["id"]})
+                # A close linked to the previous import must be reviewed against the new version
+                # (a cancelled close is history and is left as it is).
+                repo.patch_where(("close",), {"reviewRequired": True}, where={"company": company, "trialbalance": previous["id"]},
+                                 skip_statuses=(CANCELLED,))
     except BaseException:
         services.storage.delete(key)
         raise
@@ -367,6 +386,8 @@ def review_import(services: Services, ctx: Context, body: dict, r: dict) -> dict
     authorize(ctx, ["Owner", "Secretary", "Accountant"])
     if r.get("kind") != "trialbalance":
         raise BadRequest("Choose a trial balance.")
+    if r.get("status") == "Reviewed":
+        raise BadRequest("This import has already been reviewed.")
     if r.get("importedBy") == ctx.actor["id"]:
         raise BadRequest("A different reviewer must review this import.")
     if ctx.exists(kinds=["trialbalance"], where={"company": r.get("company"), "previousImport": r["id"]}):

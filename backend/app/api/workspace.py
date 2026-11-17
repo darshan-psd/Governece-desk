@@ -17,6 +17,9 @@ router = APIRouter()
 async def workspace_state(request: Request):
     ctx = await context_of(request)
     params = request.query_params
+    if params.get("export") == "briefing":
+        content, filename = await run_in_threadpool(intelligence_service.briefing_export, ctx, params.get("id"))
+        return attachment(content, "text/plain; charset=utf-8", filename)
     if "export" in params:
         pack_id = params.get("id")
         if pack_id:
@@ -26,6 +29,13 @@ async def workspace_state(request: Request):
         return attachment(csv, "text/csv", "governance-report.csv")
     body = await run_in_threadpool(records_service.read_state_json, services_of(request), ctx)
     return Response(body, media_type="application/json", headers=NO_STORE)
+
+
+@router.get("/api/v2/briefing")
+async def briefing_detail(request: Request):
+    """One briefing in full (the workspace state carries only a summary of each briefing)."""
+    ctx = await context_of(request)
+    return json_response(await run_in_threadpool(intelligence_service.briefing_detail, ctx, request.query_params.get("id")), no_store=True)
 
 
 @router.get("/api/v2/records")

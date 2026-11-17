@@ -311,9 +311,9 @@ def test_cancelled_work_is_not_outstanding_for_reminders_briefings_or_filters(wo
 
     # Briefing: the cancelled task is not a source and not counted as open.
     briefing = api.v2({"action": "briefing"})["id"]
-    sources = api.get(briefing)["sources"]
-    assert [s["id"] for s in sources] == [keep]
-    assert "1 open items" in api.get(briefing)["content"]
+    detail = api.call(f"/api/v2/briefing?id={briefing}")
+    assert [s["id"] for s in detail["sources"]] == [keep]
+    assert "1 open item · " in detail["content"]
 
     # Record list filters keep working on the new status, and the record is still retrievable.
     cancelled = api.call(f"/api/v2/records?kind=task&status=Cancelled")
