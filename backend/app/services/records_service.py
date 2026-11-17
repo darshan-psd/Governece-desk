@@ -13,7 +13,7 @@ from sqlalchemy import bindparam
 from sqlalchemy import text as sql_text
 
 from app.core.container import Services
-from app.core.errors import BadRequest, Forbidden
+from app.core.errors import BadRequest, Conflict, Forbidden
 from app.database.dialect import POSTGRES
 from app.core.jsvalues import as_list, now_iso, prop, text, today, truthy
 from app.domain.portal_domain import check_company_duplicates
@@ -25,7 +25,7 @@ from app.models import ASSIGNABLE_ROLES, Record
 from app.repositories.identity import IdentityRepository
 from app.repositories.records import ORDER, AuditRepository, RecordRepository, field
 from app.schemas import Page, RecordQuery
-from app.services.context import audit_label, save, visibility_filters
+from app.services.context import CHANGED, audit_label, save, visibility_filters
 from app.services.identity_service import add_member, apply_new_credentials, prepare_new_credentials
 
 DEMO_PROFILES = [
@@ -445,8 +445,32 @@ def edit(services: Services, ctx: Context, body: dict, r: dict) -> dict:
     rule_version = r.get("ruleVersion") or data.get("ruleVersion")
     if rule_version is not None:
         updated["ruleVersion"] = rule_version
-    result = save(services, ctx, r, updated, "Updated preparation")
+    if r["kind"] == "event" and updated.get("due") != r.get("due"):
+        result = _save_event_and_tasks(services, ctx, r, updated, "Updated preparation", {"due": updated.get("due")},
+                                       where={"due": r.get("due")}, skip=("Completed", "Approved", CANCELLED), moved="Moved {n} event checklist task{s}")
+    else:
+        result = save(services, ctx, r, updated, "Updated preparation")
     return {**result, "warning": warning} if warning else result
+
+
+def _save_event_and_tasks(services: Services, ctx: Context, event: dict, updated: dict, action: str, patch: dict, *,
+                          where: dict | None = None, skip: tuple = (), moved: str) -> dict:
+    """Saves ``event`` and applies ``patch`` to its checklist tasks in one transaction.
+
+    The checklist tasks of an event carry ``event`` and always share its company. Tasks whose
+    status is in ``skip`` are left as they are (finished, approved or cancelled work).
+    """
+    with services.db.write() as session:
+        repo = RecordRepository(session, ctx.owner)
+        if not repo.update_if_revision(event["id"], event["revision"], updated):
+            raise Conflict(CHANGED)
+        count = repo.patch_where(("task",), patch, where={"company": event.get("company"), "event": event["id"], **(where or {})},
+                                 skip_statuses=skip)
+        audit = AuditRepository.of(session, ctx)
+        audit.add(audit_label(ctx, action), event.get("title") or "")
+        if count:
+            audit.add(audit_label(ctx, moved.format(n=count, s="" if count == 1 else "s")), event.get("title") or "")
+    return {"ok": True, "id": event["id"]}
 
 
 def review_subset(ctx: Context, record: dict) -> list[dict]:

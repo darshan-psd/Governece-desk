@@ -115,6 +115,16 @@ def respond(services: Services, ctx: Context, body: dict, r: dict) -> dict:
 def request_decision(services: Services, ctx: Context, body: dict, r: dict) -> dict:
     authorize(ctx, ["Owner", "Secretary", "Accountant"])
     status = body.get("status")
+    if status == "Withdrawn":
+        # A request raised by mistake (or no longer needed) is closed without an answer, with the
+        # reason kept on the record; like any closed request it no longer blocks a financial close.
+        if r.get("kind") != "request" or r.get("status") not in ("Open", "Returned"):
+            raise BadRequest("Only a request still waiting for the client can be withdrawn.")
+        reason = text(body.get("reason"), 2000)
+        if not reason:
+            raise BadRequest("Explain why the request is withdrawn.")
+        return save(services, ctx, r, {**r, "status": "Closed", "withdrawn": True, "withdrawReason": reason,
+                                       "withdrawnBy": ctx.actor["id"], "withdrawnAt": now_iso()}, "Withdrew request")
     if r.get("kind") != "request" or r.get("status") != "Responded" or status not in ("Closed", "Returned"):
         raise BadRequest("Review a submitted response first.")
     if status == "Returned" and not text(body.get("reason")):
@@ -164,7 +174,15 @@ def plans(ctx: Context, rule: dict, horizon: int = 90) -> list[dict]:
     existing = ctx.find_many(p["id"] for p in result)  # one batched lookup instead of one per period
     for p in result:
         p["exists"] = p["id"] in existing
+        p["update"] = _outdated(existing.get(p["id"]), rule)
     return result
+
+
+def _outdated(task: dict | None, rule: dict) -> bool:
+    """A generated task not started yet and made from an older version of ``rule``: generating
+    again brings it up to the published version (work already started is never changed)."""
+    return (task is not None and task.get("kind") == "task" and task.get("status") == "Not started"
+            and (task.get("rule") or {}).get("id") == rule.get("id") and (task.get("rule") or {}).get("version") != rule.get("ruleVersion"))
 
 
 # "In progress" is not a rule status: editing a rule under review used to leave it there (fixed in
@@ -218,20 +236,31 @@ def generate(services: Services, ctx: Context, body: dict, r: dict) -> dict:
     authorize(ctx, ["Owner", "Secretary"])
     if r.get("kind") != "rule" or r.get("status") != "Published":
         raise BadRequest("Publish the reviewed rule first.")
-    plan = [p for p in plans(ctx, r) if not p["exists"]]
-    if not plan:
-        return {"ok": True, "count": 0}
+    planned = plans(ctx, r)
+    plan = [p for p in planned if not p["exists"]]
+    refresh = [p for p in planned if p["update"]]
+    if not plan and not refresh:
+        return {"ok": True, "count": 0, "updated": 0}
+
+    def fields(p: dict) -> dict:
+        return {"title": r.get("title"), "company": r.get("company"), "due": p["due"], "assignee": r.get("assignee"),
+                "priority": r.get("priority"), "source": r.get("source"),
+                "rule": {"id": r["id"], "version": r.get("ruleVersion"), "anchor": p["anchor"], "source": r.get("source")}}
+
+    current = ctx.find_many(p["id"] for p in refresh)
     with services.db.write() as session:
         repo = RecordRepository(session, ctx.owner)
         for p in plan:
-            repo.insert_or_ignore(p["id"], "task", {
-                "title": r.get("title"), "company": r.get("company"), "due": p["due"], "assignee": r.get("assignee"),
-                "priority": r.get("priority"), "status": "Not started", "category": "Recurring", "source": r.get("source"),
-                "preparer": ctx.actor["id"], "evidence": [],
-                "rule": {"id": r["id"], "version": r.get("ruleVersion"), "anchor": p["anchor"], "source": r.get("source")},
-            })
-        AuditRepository.of(session, ctx).add(audit_label(ctx, "Generated recurring obligations"), r.get("title"))
-    return {"ok": True, "count": len(plan)}
+            repo.insert_or_ignore(p["id"], "task", {**fields(p), "status": "Not started", "category": "Recurring",
+                                                    "preparer": ctx.actor["id"], "evidence": []})
+        for p in refresh:
+            task = current[p["id"]]
+            data = {k: v for k, v in task.items() if k not in ("id", "kind", "revision", "updated")}
+            if not repo.update_if_revision(task["id"], task["revision"], {**data, **fields(p)}):
+                raise BadRequest("A generated task changed meanwhile. Preview the rule again.")
+        label = "Generated recurring obligations" + (f" (updated {len(refresh)} to version {r.get('ruleVersion')})" if refresh else "")
+        AuditRepository.of(session, ctx).add(audit_label(ctx, label), r.get("title"))
+    return {"ok": True, "count": len(plan), "updated": len(refresh)}
 
 
 # Submissions -----------------------------------------------------------------------------

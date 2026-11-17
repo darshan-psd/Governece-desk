@@ -6,16 +6,30 @@ issued/void invoices; payments are reported by the client and confirmed or rejec
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from app.core.container import Services
 from app.core.errors import BadRequest, Conflict
-from app.core.jsvalues import now_iso, text, today
+from app.core.jsvalues import now_iso, text
 from app.domain.portal_domain import invoice_data, money
 from app.domain.workflow_rules import require_date
 from app.permissions import Context
 from app.repositories.records import AuditRepository, RecordRepository
 from app.services.context import audit_label
 from app.services.portal.common import evidence, portal_save, record, writer
+
+
+# Invoices are in INR for Indian clients: a payment's date is judged by the date in India, so a
+# payment made early in the morning (before 05:30, still "yesterday" in UTC) is not called future.
+INDIA = timezone(timedelta(hours=5, minutes=30))
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _india_today() -> str:
+    return _utc_now().astimezone(INDIA).date().isoformat()
 
 
 def _payments(ctx: Context, invoice: dict) -> list[dict]:
@@ -85,7 +99,7 @@ def payment_report(services: Services, ctx: Context, body: dict, c: dict) -> dic
         raise BadRequest("Amount must be greater than zero and no more than the remaining amount after pending payments.")
     reference, paid_at = text(body.get("reference")), text(body.get("paidAt"))
     require_date(paid_at, "Payment date")
-    if paid_at > today():
+    if paid_at > _india_today():
         raise BadRequest("Payment date cannot be in the future.")
     if not reference:
         raise BadRequest("Enter the bank / transaction reference.")
@@ -121,6 +135,8 @@ def payment_review(services: Services, ctx: Context, body: dict, c: dict) -> dic
     if status == "Rejected" and not text(body.get("note")):
         raise BadRequest("Explain the rejected payment.")
     if status == "Confirmed":
+        if payment.get("reportedBy") == ctx.actor["id"]:
+            raise BadRequest("A different team member must confirm a payment you recorded.")
         evidence(ctx, payment.get("evidence"), c["id"])
         invoice = ctx.find(payment.get("invoice")) or {}
         if invoice.get("status") != "Issued":
